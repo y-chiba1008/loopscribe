@@ -33,9 +33,13 @@ loopscribe = "loopscribe.cli:app"
 
 [dependency-groups]
 dev = [
+    # 検証用音声の取得。datasets 4 は ReazonSpeech の読み込みスクリプトを実行できない。
+    # アプリ本体ではなく、エディタと `uv sync` の環境から import できるようにする。
+    "datasets>=3.2,<4",
     "psutil>=6.0",
     "pytest>=8.3",
     "ruff>=0.8",
+    "soundfile>=0.12.1",
 ]
 
 [tool.hatch.build.targets.wheel]

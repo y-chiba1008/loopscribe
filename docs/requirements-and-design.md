@@ -221,8 +221,12 @@ CPU(i5-8350U / int8)で、kotoba-whisperが実用的な速度で動くかを確�
 
 ### 8.2 手順
 
-1. 普段文字起こししたい音声に近い、1〜3分のサンプル(16bit PCMのwav)と、できれば正解テキストを用意する。
-2. 段階1: `uv run scripts/bench_models.py sample.wav --reference sample.txt`(既定のkotoba-whisperと`small`を比較)。
+1. `uv run scripts/prepare_bench_audio.py` で、ReazonSpeech の `tiny` から 1〜3分(既定120秒)の
+   16bit PCM wav と正解テキストを `scripts/data/` に作る。生成物は gitignore し、リポジトリに含めない。
+   事前にブラウザで [利用条件へ同意](https://huggingface.co/datasets/reazon-research/reazonspeech) する。
+   未ログインなら、スクリプトがブラウザログインを始める。同意そのものはスクリプトに組み込まない。
+2. 段階1: `uv run scripts/bench_models.py scripts/data/sample.wav --reference scripts/data/sample.txt`
+   (既定のkotoba-whisperと`small`を比較)。
 3. 段階2: 有力なモデルに絞り、`--beam-sizes 1 5 --threads 4 8 --vad on off` で条件を振る。
 4. 結果(RTF・メモリ・CER)から、モデルと定数(`MODEL_NAME`、`CPU_THREADS`、`BEAM_SIZE`)を決め、決定ログに追記する。
 
@@ -318,3 +322,4 @@ RTF>1のモデルを選ぶ場合は、想定する録音時間と、終了後に
 | 13 | セグメントの開始時刻による担当割当てで重複除去 | 設計者の提案。決定的でテストしやすい。実装時に検証する |
 | 14 | 最初のタスクはモデル検証(`scripts/bench_models.py`) | ユーザー指定。結果でモデルと定数を確定する |
 | 15 | 実行中のデバイス切断時は、警告を出して録音を停止し、バックログを処理して終了(コード1) | ユーザー確認済み(2026-11-02)。録音済みの音声は無駄にしない |
+| 16 | モデル検証のサンプルは ReazonSpeech `tiny` からローカル生成し、`scripts/data/` に置く。生成した音声とテキストはリポジトリに含めない | ユーザー確認済み(2026-11-02)。システム音声に近く正解がある。利用は情報解析に限り、再配布はしない |

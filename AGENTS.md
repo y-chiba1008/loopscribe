@@ -34,7 +34,8 @@ uv sync                               # 依存を取得(WSLでも可)
 uv run pytest                         # 通常のテスト(slowを除く)
 uv run pytest -m slow                 # 実モデルを使うテスト
 uv run ruff check . && uv run ruff format .
-uv run scripts/bench_models.py sample.wav --reference sample.txt   # モデル検証
+uv run scripts/prepare_bench_audio.py  # 検証用wavと正解テキストを scripts/data/ に作る
+uv run scripts/bench_models.py scripts/data/sample.wav --reference scripts/data/sample.txt
 ```
 
 ## ディレクトリ構成(目標)
@@ -56,7 +57,8 @@ src/loopscribe/
 ├── pipeline.py       # スレッド構成、チャンク処理、セグメントの担当割当て
 ├── output.py         # コンソール出力とtxt出力(Sink)
 └── progress.py       # プログレスバー(rich)
-scripts/bench_models.py   # モデル検証用(単体で動く。PEP 723)
+scripts/bench_models.py          # モデル検証用(単体で動く。PEP 723)
+scripts/prepare_bench_audio.py   # 検証用wavの作成(ReazonSpeech。生成物は scripts/data/ で gitignore)
 tests/
 ```
 
