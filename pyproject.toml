@@ -20,6 +20,9 @@ classifiers = [
 # pyaudiowpatch が 3.13 で使えない場合の代替案は docs/requirements-and-design.md を参照。
 dependencies = [
     "faster-whisper>=1.1.0",
+    # 1.2.1 は av.open(metadata_errors=...) を渡す。PyAV 19 で引数が削除され、
+    # 修正は未リリース(master の PR #1495)なので 19 未満に固定する。
+    "av>=11,<19",
     "numpy>=2.1",
     "soxr>=0.5.0",
     "typer>=0.15.0",

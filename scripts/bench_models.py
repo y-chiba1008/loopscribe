@@ -3,6 +3,9 @@
 # requires-python = ">=3.13"
 # dependencies = [
 #   "faster-whisper>=1.1.0",
+#   # 1.2.1 は av.open(metadata_errors=...) を渡す。PyAV 19 で引数が削除され、
+#   # 修正は未リリース(master の PR #1495)なので 19 未満に固定する。
+#   "av>=11,<19",
 #   "psutil>=6.0",
 # ]
 # ///
