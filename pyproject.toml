@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "loopscribe"
+version = "0.1.0"
+description = "Windowsのシステム音声(WASAPIループバック)をローカルで日本語文字起こしするCLI"
+readme = "README.md"
+requires-python = ">=3.13"
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: Microsoft :: Windows",
+    "Natural Language :: Japanese",
+    "Programming Language :: Python :: 3.13",
+]
+
+# 要確認: 下限バージョンは目安。`uv lock` で解決し、Python 3.13 / Windows 向けの
+# wheel が揃うか(特に pyaudiowpatch, soxr)を最初に確認すること。
+# pyaudiowpatch が 3.13 で使えない場合の代替案は docs/requirements-and-design.md を参照。
+dependencies = [
+    "faster-whisper>=1.1.0",
+    "numpy>=2.1",
+    "soxr>=0.5.0",
+    "typer>=0.15.0",
+    "rich>=13.9",
+    # WASAPIループバック取得。Windows専用のため、WSL(Linux)では自動的にスキップされる。
+    "pyaudiowpatch>=0.2.12.7; sys_platform == 'win32'",
+]
+
+[project.scripts]
+loopscribe = "loopscribe.cli:app"
+
+[dependency-groups]
+dev = [
+    "psutil>=6.0",
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/loopscribe"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -m 'not slow'"
+markers = [
+    "slow: 実モデルを使う遅いテスト(既定ではスキップ。`uv run pytest -m slow` で実行)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
