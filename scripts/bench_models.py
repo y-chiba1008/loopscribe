@@ -270,7 +270,7 @@ def transcribe_all(
 ) -> tuple[float, list[str]]:
     """全チャンクを順に文字起こしし、(推論にかかった合計秒, 重複除去後のセグメント本文) を返す。
 
-    whisper_chunk_length は transcribe(chunk_length=...) に渡す。None なら faster-whisper の既定。
+    whisper_chunk_length は transcribe(chunk_length=...) に渡す。
 
     重複除去: 各セグメントを「開始時刻(録音開始からの絶対秒)が属する担当チャンク」だけが採用する。
     チャンクkの担当範囲は [s_k + O/2, s_{k+1} + O/2)
@@ -474,11 +474,15 @@ def main(argv: list[str] | None = None) -> int:
             load_sec = time.perf_counter() - t0
             print(f"[load] 完了 {load_sec:.1f}秒", flush=True)
 
+            # transcribe(chunk_length=N) は feature_extractor に N を書き込んだまま残すので、
+            # 未指定の条件でもモデル既定の値を明示的に渡して元に戻す
+            default_wcl = model.feature_extractor.chunk_length
             warmed = False
             for beam in args.beam_sizes:
                 for vad_flag in args.vad:
                     vad = vad_flag == "on"
                     for wcl in args.whisper_chunk_length:
+                        effective_wcl = default_wcl if wcl is None else wcl
                         if not warmed:
                             print("[warmup] 先頭チャンクを1回処理(結果は捨てる)", flush=True)
                             a, b = spans[0]
@@ -489,7 +493,7 @@ def main(argv: list[str] | None = None) -> int:
                                     beam_size=beam,
                                     vad_filter=vad,
                                     condition_on_previous_text=False,
-                                    chunk_length=wcl,
+                                    chunk_length=effective_wcl,
                                 )[0]
                             )
                             warmed = True
@@ -507,7 +511,7 @@ def main(argv: list[str] | None = None) -> int:
                                     beam_size=beam,
                                     vad=vad,
                                     overlap_sec=args.overlap_seconds,
-                                    whisper_chunk_length=wcl,
+                                    whisper_chunk_length=effective_wcl,
                                 )
                                 run_secs.append(elapsed)
                                 print(
