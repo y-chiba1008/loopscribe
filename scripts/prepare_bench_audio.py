@@ -18,6 +18,10 @@ Hugging Face の reazon-research/reazonspeech（tiny）を先頭から読み、
 生成物は情報解析（著作権法30条の4）のためのローカルファイルであり、
 リポジトリには含めない。scripts/data/ は .gitignore 済み。
 
+scripts/ignore_datas.txt がある場合、そこに書いた発話は使わない。
+1行に1件で、発話ID（`000/....flac`）だけを書く。通し番号と空行は無視する。
+3秒に満たない発話も使わない。
+
 使い方:
 
     # 事前にブラウザで利用条件へ同意する（スクリプトからはできない）
@@ -52,11 +56,14 @@ DATASET_URL = "https://huggingface.co/datasets/reazon-research/reazonspeech"
 CONFIG = "tiny"
 SAMPLE_RATE = 16_000
 DEFAULT_SECONDS = 120.0
+MIN_UTTERANCE_SECONDS = 3.0
 RECOMMENDED_MIN_SECONDS = 60.0
 RECOMMENDED_MAX_SECONDS = 180.0
-OUTPUT_DIR = Path(__file__).resolve().parent / "data"
+SCRIPT_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = SCRIPT_DIR / "data"
 WAV_NAME = "sample.wav"
 TEXT_NAME = "sample.txt"
+IGNORE_PATH = SCRIPT_DIR / "ignore_datas.txt"
 
 AGREE_HINT = (
     "ReazonSpeech を取得できません。ブラウザでログインし、利用条件に同意してください。\n"
@@ -159,11 +166,40 @@ def read_clip(raw: dict) -> tuple[np.ndarray, int]:
     return np.asarray(audio, dtype=np.float32), int(sample_rate)
 
 
-def collect(seconds: float) -> tuple[np.ndarray, list[str], list[str]]:
+def load_ignored(path: Path) -> set[str]:
+    """除外する発話IDを読む。ファイルが無ければ空集合を返す。
+
+    1行に1件。発話ID（`000/....flac`）だけを書く。
+    前後の空白、空行、行頭の通し番号は無視する。
+    """
+    if not path.is_file():
+        return set()
+    names: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        name = utterance_id(line)
+        if name:
+            names.add(name)
+    return names
+
+
+def utterance_id(line: str) -> str:
+    """1行から発話IDを取り出す。行頭の通し番号は除く。"""
+    parts = line.split(maxsplit=1)
+    if len(parts) == 2 and parts[0].isdigit():
+        return parts[1].strip()
+    return line.strip()
+
+
+def collect(
+    seconds: float,
+    ignored: set[str] | None = None,
+) -> tuple[np.ndarray, list[str], list[str]]:
     """先頭から発話を足し、累計が seconds 以上になるまで読む。
 
     戻り値は (波形, 書き起こし, 発話ID)。発話の途中では切らない。
+    ignored に含まれる発話IDと、MIN_UTTERANCE_SECONDS に満たない発話は使わない。
     """
+    ignored = set() if ignored is None else ignored
     dataset = load_dataset(
         DATASET_ID,
         CONFIG,
@@ -177,20 +213,35 @@ def collect(seconds: float) -> tuple[np.ndarray, list[str], list[str]]:
     lines: list[str] = []
     names: list[str] = []
     total = 0
+    min_samples = int(MIN_UTTERANCE_SECONDS * SAMPLE_RATE)
     print(
         f"{DATASET_ID} の {CONFIG} を先頭から読みます。累計 {seconds:g} 秒に達したら停止します。",
         file=sys.stderr,
     )
+    print(
+        f"{MIN_UTTERANCE_SECONDS:g}秒未満の発話は使いません。",
+        file=sys.stderr,
+    )
     for example in dataset:
+        name = str(example.get("name", ""))
+        if name in ignored:
+            print(f"{name or '(無名)'}  除外", file=sys.stderr)
+            continue
         text = str(example["transcription"]).strip()
         audio, sample_rate = read_clip(example["audio"])
         audio = to_mono(audio)
         audio = resample(audio, sample_rate)
-        if audio.size == 0 or not text:
+        if audio.shape[0] < min_samples:
+            print(
+                f"{name or '(無名)'}  {audio.shape[0] / SAMPLE_RATE:.1f}秒"
+                f"  除外（{MIN_UTTERANCE_SECONDS:g}秒未満）",
+                file=sys.stderr,
+            )
+            continue
+        if not text:
             continue
         pieces.append(audio)
         lines.append(text)
-        name = str(example.get("name", ""))
         names.append(name)
         total += int(audio.shape[0])
         print(
@@ -241,8 +292,14 @@ def main() -> None:
             file=sys.stderr,
         )
     ensure_logged_in()
+    ignored = load_ignored(IGNORE_PATH)
+    if ignored:
+        print(
+            f"{IGNORE_PATH.name} の {len(ignored)} 件は使いません。",
+            file=sys.stderr,
+        )
     try:
-        audio, lines, names = collect(args.seconds)
+        audio, lines, names = collect(args.seconds, ignored)
     except Exception as exc:
         if is_access_error(exc):
             print(AGREE_HINT, file=sys.stderr)
@@ -262,8 +319,8 @@ def main() -> None:
     )
     if names:
         print("使用した発話:", file=sys.stderr)
-        for name in names:
-            print(f"  {name}", file=sys.stderr)
+        for index, name in enumerate(names, start=1):
+            print(f"{index} {name}", file=sys.stderr)
 
 
 if __name__ == "__main__":
