@@ -24,8 +24,14 @@ faster-whisper(CPU / int8)で、モデルごとの処理速度(RTF)・ピーク�
     uv run scripts/bench_models.py sample.wav --reference sample.txt \\
         --beam-sizes 1 5 --threads 4 8 --vad on off --runs 3 --json result.json
 
+    # 誤りの内訳を調べる例: 差分を表示し、全文を保存する。
+    # transcribe(chunk_length=...) は未指定(none)と15秒を比べる
+    uv run scripts/bench_models.py sample.wav --reference sample.txt \\
+        --whisper-chunk-length none 15 --show-diff --save-text scripts/data/results
+
 サンプル音声の目安: 1〜3分程度、16bit PCM の wav、普段文字起こししたい音声に近いもの。
 RTF = 処理にかかった時間 / 音声の長さ。1.0を超えると実時間に追いつかない(遅延が累積する)。
+正解テキストは1行1発話。CERの内訳(置換・削除・挿入)と差分は、この行単位で表示する。
 """
 
 from __future__ import annotations
@@ -74,23 +80,140 @@ def normalize_for_cer(text: str) -> str:
     return "".join(ch for ch in text if not (ch.isspace() or unicodedata.category(ch)[0] in "PSZ"))
 
 
-def edit_distance(a: str, b: str) -> int:
-    """レーベンシュタイン距離(2行DP)。数千文字程度までを想定。"""
-    if len(a) < len(b):
-        a, b = b, a
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        cur = [i]
-        for j, cb in enumerate(b, 1):
-            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
-        prev = cur
-    return prev[-1]
+def normalize_reference(reference: str) -> list[str]:
+    """正解テキストを、1行1発話として行ごとに正規化する(空行は除く)。"""
+    lines = (normalize_for_cer(line) for line in reference.splitlines())
+    return [line for line in lines if line]
 
 
-def cer(reference: str, hypothesis: str) -> float:
-    ref = normalize_for_cer(reference)
-    hyp = normalize_for_cer(hypothesis)
-    return edit_distance(ref, hyp) / max(len(ref), 1)
+# 編集操作: "=" 一致、"S" 置換、"D" 削除(正解にあるが認識にない)、"I" 挿入(認識にだけある)
+Op = tuple[str, str, str]  # (操作, 正解の文字, 認識の文字)
+
+
+def align(ref: str, hyp: str) -> list[Op]:
+    """レーベンシュタイン距離のDP表をバックトレースし、編集操作の列を返す。
+
+    DP表を丸ごと持つので、メモリも O(len(ref) × len(hyp))。数千文字程度までを想定。
+    """
+    n, m = len(ref), len(hyp)
+    dp = [list(range(m + 1))]
+    for i in range(1, n + 1):
+        prev = dp[-1]
+        cur = [i] + [0] * m
+        r = ref[i - 1]
+        for j in range(1, m + 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (r != hyp[j - 1]))
+        dp.append(cur)
+
+    ops: list[Op] = []
+    i, j = n, m
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + (ref[i - 1] != hyp[j - 1]):
+            ops.append(("=" if ref[i - 1] == hyp[j - 1] else "S", ref[i - 1], hyp[j - 1]))
+            i -= 1
+            j -= 1
+        elif i > 0 and dp[i][j] == dp[i - 1][j] + 1:
+            ops.append(("D", ref[i - 1], ""))
+            i -= 1
+        else:
+            ops.append(("I", "", hyp[j - 1]))
+            j -= 1
+    ops.reverse()
+    return ops
+
+
+@dataclass
+class Score:
+    """CERの内訳。S + D + I がレーベンシュタイン距離に等しい。"""
+
+    ref_chars: int
+    hyp_chars: int
+    substitutions: int
+    deletions: int
+    insertions: int
+
+    @classmethod
+    def from_ops(cls, ops: list[Op]) -> Score:
+        count = {"=": 0, "S": 0, "D": 0, "I": 0}
+        for op, _r, _h in ops:
+            count[op] += 1
+        return cls(
+            ref_chars=count["="] + count["S"] + count["D"],
+            hyp_chars=count["="] + count["S"] + count["I"],
+            substitutions=count["S"],
+            deletions=count["D"],
+            insertions=count["I"],
+        )
+
+    def rate(self, n: int) -> float:
+        return n / max(self.ref_chars, 1)
+
+    @property
+    def cer(self) -> float:
+        return self.rate(self.substitutions + self.deletions + self.insertions)
+
+    @property
+    def length_ratio(self) -> float:
+        """認識 / 正解 の文字数比。0.8未満なら削除が多い、1.2超なら挿入が多い目安。"""
+        return self.hyp_chars / max(self.ref_chars, 1)
+
+
+def render_diff(ops: list[Op], ref_lines: list[str]) -> list[str]:
+    """編集操作の列を、正解の発話ごとに1行の差分にする。
+
+    表記: 一致はそのまま、[正解→認識] 置換、[-正解] 削除、[+認識] 挿入。
+    連続する誤りは1つの括弧にまとめる。各行の先頭に、発話番号とその発話のS/D/Iを付ける。
+    発話の境目にある挿入は、前の発話に含める。
+    """
+    ends: list[int] = []
+    pos = 0
+    for line in ref_lines:
+        pos += len(line)
+        ends.append(pos)
+
+    rendered: list[str] = []
+    body: list[str] = []
+    pending_ref: list[str] = []
+    pending_hyp: list[str] = []
+    counts = {"S": 0, "D": 0, "I": 0}
+    line_index = 0
+    ref_pos = 0
+
+    def flush_pending() -> None:
+        r, h = "".join(pending_ref), "".join(pending_hyp)
+        if r and h:
+            body.append(f"[{r}→{h}]")
+        elif r:
+            body.append(f"[-{r}]")
+        elif h:
+            body.append(f"[+{h}]")
+        pending_ref.clear()
+        pending_hyp.clear()
+
+    def close_line() -> None:
+        flush_pending()
+        rendered.append(
+            f"{line_index + 1:>3} [S{counts['S']} D{counts['D']} I{counts['I']}] {''.join(body)}"
+        )
+        body.clear()
+        for key in counts:
+            counts[key] = 0
+
+    for op, r, h in ops:
+        if op != "I":
+            while line_index < len(ends) - 1 and ref_pos >= ends[line_index]:
+                close_line()
+                line_index += 1
+            ref_pos += 1
+        if op == "=":
+            flush_pending()
+            body.append(r)
+            continue
+        counts[op] += 1
+        pending_ref.append(r)
+        pending_hyp.append(h)
+    close_line()
+    return rendered
 
 
 def verdict(rtf: float) -> str:
@@ -143,11 +266,15 @@ def transcribe_all(
     beam_size: int,
     vad: bool,
     overlap_sec: float,
-) -> tuple[float, str]:
-    """全チャンクを順に文字起こしし、(推論にかかった合計秒, 重複除去後の本文) を返す。
+    whisper_chunk_length: int | None = None,
+) -> tuple[float, list[str]]:
+    """全チャンクを順に文字起こしし、(推論にかかった合計秒, 重複除去後のセグメント本文) を返す。
+
+    whisper_chunk_length は transcribe(chunk_length=...) に渡す。None なら faster-whisper の既定。
 
     重複除去: 各セグメントを「開始時刻(録音開始からの絶対秒)が属する担当チャンク」だけが採用する。
-    チャンクkの担当範囲は [s_k + O/2, s_{k+1} + O/2)(先頭チャンクの下限は0、最終チャンクの上限は無限大)。
+    チャンクkの担当範囲は [s_k + O/2, s_{k+1} + O/2)
+    (先頭チャンクの下限は0、最終チャンクの上限は無限大)。
     """
     elapsed = 0.0
     kept: list[str] = []
@@ -162,6 +289,7 @@ def transcribe_all(
             beam_size=beam_size,
             vad_filter=vad,
             condition_on_previous_text=False,
+            chunk_length=whisper_chunk_length,
         )
         segs = list(segments)  # ジェネレータを消費するまでが推論時間
         elapsed += time.perf_counter() - t0
@@ -169,7 +297,7 @@ def transcribe_all(
         for seg in segs:
             if lo <= offset + seg.start < hi:
                 kept.append(seg.text.strip())
-    return elapsed, "".join(kept)
+    return elapsed, kept
 
 
 @dataclass
@@ -188,6 +316,48 @@ class Result:
     cer: float | None
     verdict: str
     text_head: str
+    whisper_chunk_length: int | None = None
+    ref_chars: int | None = None
+    hyp_chars: int | None = None
+    substitutions: int | None = None
+    deletions: int | None = None
+    insertions: int | None = None
+    substitution_rate: float | None = None
+    deletion_rate: float | None = None
+    insertion_rate: float | None = None
+    length_ratio: float | None = None
+
+    @property
+    def label(self) -> str:
+        wcl = "none" if self.whisper_chunk_length is None else self.whisper_chunk_length
+        return (
+            f"{self.model} thr={self.cpu_threads} beam={self.beam_size} "
+            f"vad={'on' if self.vad else 'off'} wcl={wcl}"
+        )
+
+    @property
+    def file_stem(self) -> str:
+        wcl = "none" if self.whisper_chunk_length is None else self.whisper_chunk_length
+        model = self.model.replace("/", "__")
+        return (
+            f"{model}_thr{self.cpu_threads}_beam{self.beam_size}"
+            f"_vad{'on' if self.vad else 'off'}_wcl{wcl}"
+        )
+
+
+def save_texts(
+    directory: Path,
+    result: Result,
+    segments: list[str],
+    hyp_norm: str,
+    diff_lines: list[str] | None,
+) -> None:
+    """条件ごとに、認識結果の全文(1行1セグメント)・正規化後の認識・差分を保存する。"""
+    stem = result.file_stem
+    (directory / f"{stem}.hyp.txt").write_text("\n".join(segments) + "\n", encoding="utf-8")
+    (directory / f"{stem}.hyp.norm.txt").write_text(hyp_norm + "\n", encoding="utf-8")
+    if diff_lines is not None:
+        (directory / f"{stem}.diff.txt").write_text("\n".join(diff_lines) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------- CLI
@@ -207,9 +377,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--runs", type=int, default=3, help="条件ごとの計測回数(ウォームアップ除く)")
     p.add_argument("--seconds", type=float, help="音声の先頭N秒だけを使う")
     p.add_argument("--reference", help="正解テキスト(UTF-8)。指定するとCERを計算する")
+    p.add_argument(
+        "--whisper-chunk-length",
+        nargs="+",
+        type=parse_whisper_chunk_length,
+        default=[None],
+        metavar="N",
+        help="transcribe(chunk_length=N) に渡す秒数。none は未指定(既定)。複数指定で比較する",
+    )
     p.add_argument("--json", help="結果をJSONで保存するパス")
     p.add_argument("--show-text", action="store_true", help="認識結果の先頭を表示する")
-    return p.parse_args(argv)
+    p.add_argument(
+        "--show-diff",
+        action="store_true",
+        help="正規化後の正解と認識の差分を、発話ごとに表示する(--reference が必要)",
+    )
+    p.add_argument(
+        "--save-text",
+        metavar="DIR",
+        help="条件ごとに認識の全文・正規化後の正解と認識・差分を保存する"
+        "(Git管理外の scripts/data/ の下を推奨)",
+    )
+    args = p.parse_args(argv)
+    if args.show_diff and not args.reference:
+        p.error("--show-diff には --reference が必要です")
+    return args
+
+
+def parse_whisper_chunk_length(value: str) -> int | None:
+    if value.lower() == "none":
+        return None
+    n = int(value)
+    if n <= 0:
+        raise argparse.ArgumentTypeError("正の整数か none を指定してください")
+    return n
 
 
 def print_environment() -> None:
@@ -242,13 +443,25 @@ def main(argv: list[str] | None = None) -> int:
     spans = make_chunks(
         len(audio), args.chunk_seconds * SAMPLE_RATE, args.overlap_seconds * SAMPLE_RATE
     )
-    reference = Path(args.reference).read_text(encoding="utf-8") if args.reference else None
+    ref_lines = (
+        normalize_reference(Path(args.reference).read_text(encoding="utf-8"))
+        if args.reference
+        else None
+    )
+    save_dir = Path(args.save_text) if args.save_text else None
+    if save_dir is not None:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        if ref_lines is not None:
+            (save_dir / "reference.norm.txt").write_text(
+                "\n".join(ref_lines) + "\n", encoding="utf-8"
+            )
     print(
         f"音声: {audio_sec:.1f}秒 / チャンク: {len(spans)}個"
         f"({args.chunk_seconds}秒、重なり{args.overlap_seconds}秒)\n"
     )
 
     results: list[Result] = []
+    diffs: list[list[str] | None] = []
     for model_name in args.models:
         for threads in args.threads:
             print(
@@ -265,44 +478,49 @@ def main(argv: list[str] | None = None) -> int:
             for beam in args.beam_sizes:
                 for vad_flag in args.vad:
                     vad = vad_flag == "on"
-                    if not warmed:
-                        print("[warmup] 先頭チャンクを1回処理(結果は捨てる)", flush=True)
-                        a, b = spans[0]
-                        list(
-                            model.transcribe(
-                                audio[a:b],
-                                language=LANGUAGE,
-                                beam_size=beam,
-                                vad_filter=vad,
-                                condition_on_previous_text=False,
-                            )[0]
-                        )
-                        warmed = True
-
-                    label = f"beam={beam} vad={vad_flag}"
-                    print(f"[run] {label} x{args.runs}", flush=True)
-                    run_secs: list[float] = []
-                    text = ""
-                    with PeakMemory() as mem:
-                        for i in range(args.runs):
-                            elapsed, text = transcribe_all(
-                                model,
-                                audio,
-                                spans,
-                                beam_size=beam,
-                                vad=vad,
-                                overlap_sec=args.overlap_seconds,
+                    for wcl in args.whisper_chunk_length:
+                        if not warmed:
+                            print("[warmup] 先頭チャンクを1回処理(結果は捨てる)", flush=True)
+                            a, b = spans[0]
+                            list(
+                                model.transcribe(
+                                    audio[a:b],
+                                    language=LANGUAGE,
+                                    beam_size=beam,
+                                    vad_filter=vad,
+                                    condition_on_previous_text=False,
+                                    chunk_length=wcl,
+                                )[0]
                             )
-                            run_secs.append(elapsed)
-                            print(
-                                f"       #{i + 1}: {elapsed:.1f}秒 (RTF {elapsed / audio_sec:.2f})",
-                                flush=True,
-                            )
+                            warmed = True
 
-                    rtfs = [s / audio_sec for s in run_secs]
-                    rtf_mean = sum(rtfs) / len(rtfs)
-                    results.append(
-                        Result(
+                        label = f"beam={beam} vad={vad_flag} wcl={'none' if wcl is None else wcl}"
+                        print(f"[run] {label} x{args.runs}", flush=True)
+                        run_secs: list[float] = []
+                        segments: list[str] = []
+                        with PeakMemory() as mem:
+                            for i in range(args.runs):
+                                elapsed, segments = transcribe_all(
+                                    model,
+                                    audio,
+                                    spans,
+                                    beam_size=beam,
+                                    vad=vad,
+                                    overlap_sec=args.overlap_seconds,
+                                    whisper_chunk_length=wcl,
+                                )
+                                run_secs.append(elapsed)
+                                print(
+                                    f"       #{i + 1}: {elapsed:.1f}秒"
+                                    f" (RTF {elapsed / audio_sec:.2f})",
+                                    flush=True,
+                                )
+
+                        text = "".join(segments)
+                        hyp_norm = normalize_for_cer(text)
+                        rtfs = [s / audio_sec for s in run_secs]
+                        rtf_mean = sum(rtfs) / len(rtfs)
+                        result = Result(
                             model=model_name,
                             cpu_threads=threads,
                             beam_size=beam,
@@ -314,31 +532,79 @@ def main(argv: list[str] | None = None) -> int:
                             rtf_min=min(rtfs),
                             rtf_max=max(rtfs),
                             peak_rss_mb=mem.peak_mb,
-                            cer=cer(reference, text) if reference else None,
+                            cer=None,
                             verdict=verdict(rtf_mean),
                             text_head=text[:120],
+                            whisper_chunk_length=wcl,
                         )
-                    )
+                        diff_lines: list[str] | None = None
+                        if ref_lines is not None:
+                            ops = align("".join(ref_lines), hyp_norm)
+                            score = Score.from_ops(ops)
+                            result.cer = score.cer
+                            result.ref_chars = score.ref_chars
+                            result.hyp_chars = score.hyp_chars
+                            result.substitutions = score.substitutions
+                            result.deletions = score.deletions
+                            result.insertions = score.insertions
+                            result.substitution_rate = score.rate(score.substitutions)
+                            result.deletion_rate = score.rate(score.deletions)
+                            result.insertion_rate = score.rate(score.insertions)
+                            result.length_ratio = score.length_ratio
+                            diff_lines = render_diff(ops, ref_lines)
+                        if save_dir is not None:
+                            save_texts(save_dir, result, segments, hyp_norm, diff_lines)
+                        results.append(result)
+                        diffs.append(diff_lines)
             del model
             gc.collect()
             print()
 
     print("== 結果 ==")
-    header = f"{'model':<42} {'thr':>3} {'beam':>4} {'vad':>3} {'load':>6} {'RTF(平均)':>9} {'min-max':>11} {'RSS(MB)':>8} {'CER':>6}  判定"
+    header = (
+        f"{'model':<42} {'thr':>3} {'beam':>4} {'vad':>3} {'wcl':>4} {'load':>6} "
+        f"{'RTF(平均)':>9} {'min-max':>11} {'RSS(MB)':>8} {'CER':>6} {'長さ比':>5}  判定"
+    )
     print(header)
     for r in results:
         cer_s = f"{r.cer:.3f}" if r.cer is not None else "-"
+        ratio_s = f"{r.length_ratio:.2f}" if r.length_ratio is not None else "-"
+        wcl_s = "none" if r.whisper_chunk_length is None else str(r.whisper_chunk_length)
         print(
             f"{r.model:<42} {r.cpu_threads:>3} {r.beam_size:>4} {'on' if r.vad else 'off':>3} "
-            f"{r.load_sec:>5.1f}s {r.rtf_mean:>9.2f} {r.rtf_min:>5.2f}-{r.rtf_max:<5.2f} "
-            f"{r.peak_rss_mb:>8.0f} {cer_s:>6}  {r.verdict}"
+            f"{wcl_s:>4} {r.load_sec:>5.1f}s {r.rtf_mean:>9.2f} "
+            f"{r.rtf_min:>5.2f}-{r.rtf_max:<5.2f} {r.peak_rss_mb:>8.0f} {cer_s:>6} "
+            f"{ratio_s:>8}  {r.verdict}"
         )
+        if r.cer is not None:
+            print(
+                f"    誤り: 置換 {r.substitutions} ({r.substitution_rate:.1%})"
+                f" / 削除 {r.deletions} ({r.deletion_rate:.1%})"
+                f" / 挿入 {r.insertions} ({r.insertion_rate:.1%})"
+                f"  文字数: 正解 {r.ref_chars} / 認識 {r.hyp_chars}"
+            )
         if args.show_text:
             print(f"    本文(先頭): {r.text_head}")
     print(
-        "\n注: RSSはモデル常駐分を含むプロセス全体の概算。正確に比べるにはモデルごとに別プロセスで実行すること。"
+        "\n注: RSSはモデル常駐分を含むプロセス全体の概算。"
+        "正確に比べるにはモデルごとに別プロセスで実行すること。"
     )
+    if ref_lines is not None:
+        print(
+            "注: 削除は正解にあって認識にない文字(取りこぼし)、挿入は認識にだけある文字(幻覚など)。"
+            "長さ比 = 認識 / 正解 の文字数。"
+        )
 
+    if args.show_diff:
+        print("\n== 差分 ==")
+        print("表記: [正解→認識] 置換、[-正解] 削除、[+認識] 挿入。行頭は発話番号とその発話のS/D/I")
+        for r, diff_lines in zip(results, diffs, strict=True):
+            print(f"\n-- {r.label} --")
+            for line in diff_lines or []:
+                print(line)
+
+    if save_dir is not None:
+        print(f"\n認識結果を保存しました: {save_dir}(Gitに含めないこと)")
     if args.json:
         Path(args.json).write_text(
             json.dumps([asdict(r) for r in results], ensure_ascii=False, indent=2),
