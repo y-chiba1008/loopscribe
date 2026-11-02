@@ -22,12 +22,17 @@ scripts/ignore_datas.txt がある場合、そこに書いた発話は使わな�
 1行に1件で、発話ID（`000/....flac`）だけを書く。通し番号と空行は無視する。
 3秒に満たない発話も使わない。
 
+--gap-seconds を指定すると、発話の間に無音を入れる。累計秒数には無音を含めないので、
+gap の有無で同じ発話の組になる(正解テキストは同じ)。--name で出力名を変えれば、
+両方を残して比べられる。発話ごとの位置と長さは <name>.json に書く。
+
 使い方:
 
     # 事前にブラウザで利用条件へ同意する（スクリプトからはできない）
     # https://huggingface.co/datasets/reazon-research/reazonspeech
     uv run scripts/prepare_bench_audio.py
     uv run scripts/prepare_bench_audio.py --seconds 180
+    uv run scripts/prepare_bench_audio.py --gap-seconds 1 --name sample_gap1
 
 未ログインなら、対話端末ではブラウザログインを始める。トークンを渡す場合:
 
@@ -41,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import sys
 import wave
 from pathlib import Path
@@ -61,8 +67,7 @@ RECOMMENDED_MIN_SECONDS = 60.0
 RECOMMENDED_MAX_SECONDS = 180.0
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = SCRIPT_DIR / "data"
-WAV_NAME = "sample.wav"
-TEXT_NAME = "sample.txt"
+DEFAULT_NAME = "sample"
 IGNORE_PATH = SCRIPT_DIR / "ignore_datas.txt"
 
 AGREE_HINT = (
@@ -87,6 +92,17 @@ def parse_args() -> argparse.Namespace:
             f"既定は {DEFAULT_SECONDS:g}。検証の目安は "
             f"{RECOMMENDED_MIN_SECONDS:g}〜{RECOMMENDED_MAX_SECONDS:g}"
         ),
+    )
+    parser.add_argument(
+        "--gap-seconds",
+        type=float,
+        default=0.0,
+        help="発話の間に入れる無音の秒数。累計秒数には含めない。既定は 0(間を空けない)",
+    )
+    parser.add_argument(
+        "--name",
+        default=DEFAULT_NAME,
+        help=f"出力ファイル名(拡張子なし)。scripts/data/ に書く。既定は {DEFAULT_NAME}",
     )
     return parser.parse_args()
 
@@ -193,10 +209,10 @@ def utterance_id(line: str) -> str:
 def collect(
     seconds: float,
     ignored: set[str] | None = None,
-) -> tuple[np.ndarray, list[str], list[str]]:
+) -> tuple[list[np.ndarray], list[str], list[str]]:
     """先頭から発話を足し、累計が seconds 以上になるまで読む。
 
-    戻り値は (波形, 書き起こし, 発話ID)。発話の途中では切らない。
+    戻り値は (発話ごとの波形, 書き起こし, 発話ID)。発話の途中では切らない。
     ignored に含まれる発話IDと、MIN_UTTERANCE_SECONDS に満たない発話は使わない。
     """
     ignored = set() if ignored is None else ignored
@@ -256,7 +272,25 @@ def collect(
             f"データセットを最後まで読みましたが {seconds:g} 秒に足りません"
             f"（{total / SAMPLE_RATE:.1f}秒）。"
         )
-    return np.concatenate(pieces), lines, names
+    return pieces, lines, names
+
+
+def join_with_gaps(
+    pieces: list[np.ndarray], gap_seconds: float
+) -> tuple[np.ndarray, list[tuple[int, int]]]:
+    """発話の間に無音を入れてつなぐ。戻り値は (波形, 発話ごとの [開始, 終了) サンプル位置)。"""
+    gap = np.zeros(int(round(gap_seconds * SAMPLE_RATE)), dtype=np.float32)
+    parts: list[np.ndarray] = []
+    spans: list[tuple[int, int]] = []
+    position = 0
+    for index, piece in enumerate(pieces):
+        if index > 0 and gap.size:
+            parts.append(gap)
+            position += gap.size
+        parts.append(piece)
+        spans.append((position, position + piece.shape[0]))
+        position += piece.shape[0]
+    return np.concatenate(parts), spans
 
 
 def write_wav(path: Path, audio: np.ndarray) -> None:
@@ -279,10 +313,45 @@ def write_text(path: Path, lines: list[str]) -> None:
     temporary.replace(path)
 
 
+def write_segments(
+    path: Path,
+    names: list[str],
+    spans: list[tuple[int, int]],
+    gap_seconds: float,
+    total_samples: int,
+) -> None:
+    """発話ごとの位置と長さを JSON で書く。順番は正解テキストの行と同じ。"""
+    data = {
+        "sample_rate": SAMPLE_RATE,
+        "gap_seconds": gap_seconds,
+        "duration_sec": round(total_samples / SAMPLE_RATE, 3),
+        "utterances": [
+            {
+                "index": index,
+                "id": name,
+                "start_sec": round(start / SAMPLE_RATE, 3),
+                "end_sec": round(end / SAMPLE_RATE, 3),
+                "duration_sec": round((end - start) / SAMPLE_RATE, 3),
+            }
+            for index, (name, (start, end)) in enumerate(zip(names, spans, strict=True), start=1)
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.partial")
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
 def main() -> None:
     args = parse_args()
     if args.seconds <= 0:
         print("--seconds は正の数にしてください。", file=sys.stderr)
+        raise SystemExit(2)
+    if args.gap_seconds < 0:
+        print("--gap-seconds は 0 以上にしてください。", file=sys.stderr)
+        raise SystemExit(2)
+    if not args.name or Path(args.name).name != args.name:
+        print("--name にはディレクトリを含まないファイル名を指定してください。", file=sys.stderr)
         raise SystemExit(2)
     if not (RECOMMENDED_MIN_SECONDS <= args.seconds <= RECOMMENDED_MAX_SECONDS):
         print(
@@ -299,21 +368,26 @@ def main() -> None:
             file=sys.stderr,
         )
     try:
-        audio, lines, names = collect(args.seconds, ignored)
+        pieces, lines, names = collect(args.seconds, ignored)
     except Exception as exc:
         if is_access_error(exc):
             print(AGREE_HINT, file=sys.stderr)
             raise SystemExit(1) from exc
         raise
-    wav_path = OUTPUT_DIR / WAV_NAME
-    text_path = OUTPUT_DIR / TEXT_NAME
+    audio, spans = join_with_gaps(pieces, args.gap_seconds)
+    wav_path = OUTPUT_DIR / f"{args.name}.wav"
+    text_path = OUTPUT_DIR / f"{args.name}.txt"
+    segments_path = OUTPUT_DIR / f"{args.name}.json"
     write_wav(wav_path, audio)
     write_text(text_path, lines)
+    write_segments(segments_path, names, spans, args.gap_seconds, audio.shape[0])
     duration = audio.shape[0] / SAMPLE_RATE
+    gap_note = f", 発話間の無音 {args.gap_seconds:g}秒" if args.gap_seconds else ""
     print(
         "書き出しました。このファイルは Git に含めません。\n"
-        f"  {wav_path}  ({duration:.1f}秒, {len(lines)}発話)\n"
+        f"  {wav_path}  ({duration:.1f}秒, {len(lines)}発話{gap_note})\n"
         f"  {text_path}\n"
+        f"  {segments_path}\n"
         "モデル検証:\n"
         f"  uv run scripts/bench_models.py {wav_path} --reference {text_path}"
     )
