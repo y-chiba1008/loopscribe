@@ -10,7 +10,7 @@ GPU不要・従量課金なし。音声は外部に送信されません(通信�
 ## 特徴(予定)
 
 - WASAPIループバックで、再生中の音声をそのまま取得(Windowsのみ)
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) + kotoba-whisper で日本語を文字起こし(CPU / int8)
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) + Whisper `small` で日本語を文字起こし(CPU / int8)
 - 約30秒ごとにまとめて処理(リアルタイム性より、低スペックPCでの安定動作を優先)
 - 結果をコンソールとtxtファイル(タイムスタンプ付き)に出力
 - 進捗(処理済み時間 / 録音時間)をプログレスバーで表示
@@ -75,17 +75,22 @@ uv run ruff check . && uv run ruff format --check .
 `scripts/bench_models.py` は、アプリ本体と同じ条件(30秒チャンク + 3秒の重なり)で処理します。
 
 ```bash
+# サンプルを作る(ReazonSpeech。出力は scripts/data/ で、Git には含めない)
+uv run scripts/prepare_bench_audio.py
+
 # 段階1: モデルだけを比較(既定: kotoba-whisper と small)
-uv run scripts/bench_models.py sample.wav --reference sample.txt
+uv run scripts/bench_models.py scripts/data/sample.wav --reference scripts/data/sample.txt
 
 # 段階2: 有力なモデルに絞って、beam_size・スレッド数・VADを振る
-uv run scripts/bench_models.py sample.wav --reference sample.txt \
+uv run scripts/bench_models.py scripts/data/sample.wav --reference scripts/data/sample.txt \
     --models kotoba-tech/kotoba-whisper-v2.0-faster \
     --beam-sizes 1 5 --threads 4 8 --vad on off --json result.json
 ```
 
-- サンプルは、1〜3分程度・16bit PCMのwavで、普段文字起こししたい音声に近いものを使います。
-  **著作権やプライバシーに問題のない音声**にしてください。
+- サンプルは、ReazonSpeech の先頭から作った 1〜3分程度・16bit PCM の wav です。
+  生成した音声とテキストはローカル専用です。リポジトリには含めません。
+- 取得の前に、ブラウザで [ReazonSpeech の利用条件](https://huggingface.co/datasets/reazon-research/reazonspeech) へ同意してください。
+  未ログインなら、スクリプトがブラウザログインを始めます。
 - 計測中は他の重い処理を止めてください(ノートPCは熱でクロックが下がりやすいです)。
 - RTFが1.0を超えると、録音1時間あたり `(RTF − 1) × 60` 分ずつ処理が遅れます。判断基準は設計資料の「モデル検証」を参照してください。
 

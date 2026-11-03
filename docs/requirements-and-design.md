@@ -23,7 +23,7 @@ PCで再生されている音声(システム音声)を、**ローカル(GPUな�
 | 言語 | 日本語 |
 | コスト | 従量課金なし。完全ローカル処理(通信はモデルのダウンロード時のみ) |
 | 配布 | GitHubから `uv tool install git+https://...`(自分用。PyPI公開は未定) |
-| モデル | kotoba-whisper(faster-whisper形式)。**最終確定はモデル検証の後** |
+| モデル | Whisper `small`(faster-whisper形式)。モデル検証で確定(決定ログ#17) |
 | コマンド名 | `loopscribe`(変更する場合は `pyproject.toml` の `name` と `[project.scripts]`、パッケージ名を変える) |
 
 ## 3. スコープ
@@ -186,17 +186,21 @@ Windowsでは `Event.wait()` をタイムアウトなしで呼ぶとシグナル
   録音を止めると合計が固定され、バックログの処理が進むにつれて100%に近づく。
 - 更新は、チャンク完了時と `UI_REFRESH_SECONDS` ごと(mainスレッドが共有カウンタを読む)。
 - テキストの出力は `progress.console.print` などで、バーの上に流す(同じConsole経由)。
+- **起動時のモデル読み込み**: 読み込みの間は「モデルを読み込み中」と表示する(richのスピナー。同じConsole経由)。
+  対象PCでは、1回目の読み込みに約67秒(`small`)かかり、2回目以降は数秒だった(決定ログ#18)。
+  モデルの読み込みが終わってから録音を始め、録音の開始をメッセージで知らせる(録音の開始時刻を、ユーザーが分かるようにする)。
+  標準出力がTTYでない場合は、スピナーの代わりに1行のメッセージだけを出す。
 
 ## 7. 定数(`constants.py`)
 
 | 定数 | 暫定値 | 備考 |
 |---|---|---|
-| `MODEL_NAME` | `kotoba-tech/kotoba-whisper-v2.0-faster` | **検証で確定**。`small` などに変わる可能性あり |
+| `MODEL_NAME` | `small` | 検証で確定(決定ログ#17) |
 | `COMPUTE_TYPE` | `"int8"` | CPU向け量子化 |
-| `CPU_THREADS` | 4 | 物理コア数。検証で4と8を比較 |
+| `CPU_THREADS` | 4 | 物理コア数。検証で確定(8スレッドより速い) |
 | `LANGUAGE` | `"ja"` | |
-| `BEAM_SIZE` | 1 | CPU負荷を優先した暫定値。検証で5と比較 |
-| `VAD_FILTER` | `True` | |
+| `BEAM_SIZE` | 1 | 検証で確定。5にしてもCERの改善が小さい |
+| `VAD_FILTER` | `True` | 検証で確定。オフにすると取りこぼしが増える |
 | `CONDITION_ON_PREVIOUS_TEXT` | `False` | チャンクをまたいだ誤りの伝播を防ぐ |
 | `SAMPLE_RATE` | 16000 | |
 | `CHUNK_SECONDS` / `OVERLAP_SECONDS` | 30 / 3 | |
@@ -221,8 +225,12 @@ CPU(i5-8350U / int8)で、kotoba-whisperが実用的な速度で動くかを確�
 
 ### 8.2 手順
 
-1. 普段文字起こししたい音声に近い、1〜3分のサンプル(16bit PCMのwav)と、できれば正解テキストを用意する。
-2. 段階1: `uv run scripts/bench_models.py sample.wav --reference sample.txt`(既定のkotoba-whisperと`small`を比較)。
+1. `uv run scripts/prepare_bench_audio.py` で、ReazonSpeech の `tiny` から 1〜3分(既定120秒)の
+   16bit PCM wav と正解テキストを `scripts/data/` に作る。生成物は gitignore し、リポジトリに含めない。
+   事前にブラウザで [利用条件へ同意](https://huggingface.co/datasets/reazon-research/reazonspeech) する。
+   未ログインなら、スクリプトがブラウザログインを始める。同意そのものはスクリプトに組み込まない。
+2. 段階1: `uv run scripts/bench_models.py scripts/data/sample.wav --reference scripts/data/sample.txt`
+   (既定のkotoba-whisperと`small`を比較)。
 3. 段階2: 有力なモデルに絞り、`--beam-sizes 1 5 --threads 4 8 --vad on off` で条件を振る。
 4. 結果(RTF・メモリ・CER)から、モデルと定数(`MODEL_NAME`、`CPU_THREADS`、`BEAM_SIZE`)を決め、決定ログに追記する。
 
@@ -279,7 +287,7 @@ RTF>1のモデルを選ぶ場合は、想定する録音時間と、終了後に
 
 | # | 内容 | 対応案 |
 |---|---|---|
-| 1 | kotoba-whisperが、このCPUでは遅すぎる可能性 | モデル検証(§8)で確定。ダメなら `small` などへ。決定ログに追記 |
+| 1 | (解決済み)kotoba-whisperが、このCPUでは遅すぎる可能性 | 対象PCでRTF 1.6〜2.2だったため、`small` に決定(決定ログ#17) |
 | 2 | Python 3.13向けのwheel(`pyaudiowpatch`、`soxr`)が揃わない可能性 | `uv lock` で最初に確認。`pyaudiowpatch` が使えない場合の代替は `soundcard`(純Python。`include_loopback=True` でWindowsのループバックを取得できる)。AudioSourceの差し替えで吸収できる |
 | 3 | 無音時にコールバックが来ず、タイムスタンプがずれる | §6.4。Windows実機で確認し、必要なら無音サンプルを挿入する |
 | 4 | (解決済み)実行中のデバイス切断時の挙動 | §9のとおり確定(2026-11-02)。実機での動作確認のみ残る |
@@ -305,7 +313,7 @@ RTF>1のモデルを選ぶ場合は、想定する録音時間と、終了後に
 |---|---|---|
 | 1 | 実行はWindowsのみ。開発はWSL2 | WASAPIはWindows固有。コアをOS非依存にすれば、WSLで開発・テストできる |
 | 2 | 音声取得を `AudioSource` の後ろに分離 | WSLでのテスト(WavFileSource)と、将来のマイク入力・代替ライブラリに備える |
-| 3 | faster-whisper(CPU / int8)。kotoba-whisperを使う | ユーザー指定。CPUでの速度は検証で確認し、確定する |
+| 3 | faster-whisper(CPU / int8)。kotoba-whisperを使う(#17で `small` に変更) | ユーザー指定。CPUでの速度は検証で確認し、確定する |
 | 4 | 30秒チャンク + 3秒の重なり + VAD | 更新速度は低くてよい。エンコーダが30秒窓固定のため、30秒が効率的 |
 | 5 | 遅れは無制限に許容。未処理音声は破棄しない。破棄マーカーなし | 当初案は「上限超過で破棄+マーカー」。音声は1時間あたり約115MBで、メモリに十分収まるため変更 |
 | 6 | 警告のみの方針。ただし起動時の致命的な状況は終了 | 続行できない状況で動き続けても意味がないため |
@@ -318,3 +326,6 @@ RTF>1のモデルを選ぶ場合は、想定する録音時間と、終了後に
 | 13 | セグメントの開始時刻による担当割当てで重複除去 | 設計者の提案。決定的でテストしやすい。実装時に検証する |
 | 14 | 最初のタスクはモデル検証(`scripts/bench_models.py`) | ユーザー指定。結果でモデルと定数を確定する |
 | 15 | 実行中のデバイス切断時は、警告を出して録音を停止し、バックログを処理して終了(コード1) | ユーザー確認済み(2026-11-02)。録音済みの音声は無駄にしない |
+| 16 | モデル検証のサンプルは ReazonSpeech `tiny` からローカル生成し、`scripts/data/` に置く。生成した音声とテキストはリポジトリに含めない | ユーザー確認済み(2026-11-02)。システム音声に近く正解がある。利用は情報解析に限り、再配布はしない |
+| 17 | `MODEL_NAME="small"`、`CPU_THREADS=4`、`BEAM_SIZE=1`、`VAD_FILTER=True` | ユーザー確認済み(2026-11-03)。対象PC(i5-8350U)での計測(120秒・17発話)は、`small` / 4スレッド / beam=1 で RTF 0.29、CER 0.190、RSS 約590MB。kotoba-whisper(`chunk_length=15`)は RTF 1.6〜2.2 で遅れが累積し、CERは beam=5 でも 0.178 で `small` と同程度だった。8スレッドは両モデルとも4スレッドより遅い。beam=5 は CER 0.180 で改善が小さく、RTF が 0.39 に上がるため採用しない。kotoba-whisper を使わないので、`chunk_length` の定数は追加しない。詳細は Issue #1 |
+| 18 | 起動時のモデル読み込み中は「読み込み中」と表示する | ユーザー確認済み(2026-11-03)。対象PCでの計測で、1回目の読み込みが `small` で約67秒、kotoba-whisper で約167秒かかった(2回目以降は数秒)。表示がないと、止まったように見える |

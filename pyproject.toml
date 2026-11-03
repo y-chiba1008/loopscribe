@@ -20,6 +20,9 @@ classifiers = [
 # pyaudiowpatch が 3.13 で使えない場合の代替案は docs/requirements-and-design.md を参照。
 dependencies = [
     "faster-whisper>=1.1.0",
+    # 1.2.1 は av.open(metadata_errors=...) を渡す。PyAV 19 で引数が削除され、
+    # 修正は未リリース(master の PR #1495)なので 19 未満に固定する。
+    "av>=11,<19",
     "numpy>=2.1",
     "soxr>=0.5.0",
     "typer>=0.15.0",
@@ -33,9 +36,13 @@ loopscribe = "loopscribe.cli:app"
 
 [dependency-groups]
 dev = [
+    # 検証用音声の取得。datasets 4 は ReazonSpeech の読み込みスクリプトを実行できない。
+    # アプリ本体ではなく、エディタと `uv sync` の環境から import できるようにする。
+    "datasets>=3.2,<4",
     "psutil>=6.0",
     "pytest>=8.3",
     "ruff>=0.8",
+    "soundfile>=0.12.1",
 ]
 
 [tool.hatch.build.targets.wheel]
