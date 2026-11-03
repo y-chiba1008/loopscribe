@@ -10,7 +10,7 @@ GPU不要・従量課金なし。音声は外部に送信されません(通信�
 ## 特徴(予定)
 
 - WASAPIループバックで、再生中の音声をそのまま取得(Windowsのみ)
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) + kotoba-whisper で日本語を文字起こし(CPU / int8)
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) + Whisper `small` で日本語を文字起こし(CPU / int8)
 - 約30秒ごとにまとめて処理(リアルタイム性より、低スペックPCでの安定動作を優先)
 - 結果をコンソールとtxtファイル(タイムスタンプ付き)に出力
 - 進捗(処理済み時間 / 録音時間)をプログレスバーで表示

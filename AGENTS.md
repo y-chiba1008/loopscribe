@@ -7,7 +7,7 @@
 ## プロジェクト概要
 
 `loopscribe`: Windowsのシステム音声(WASAPIループバック)を、ローカルで日本語に文字起こしするCLI。
-faster-whisper(CPU / int8)+ kotoba-whisper。GPUなし・従量課金なし。
+faster-whisper(CPU / int8)+ Whisper `small`。GPUなし・従量課金なし。
 `uv tool install` で配布するPythonパッケージ。現在は設計済み・未実装の状態。
 
 ## 守るべき決定事項(変更する場合は、ユーザーに確認すること)
