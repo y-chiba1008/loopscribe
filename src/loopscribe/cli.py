@@ -62,10 +62,7 @@ def _make_console() -> Console:
 
 def _require_windows(console: Console) -> None:
     if sys.platform != "win32":
-        console.print(
-            "[red]エラー:[/red] 音声取得は Windows でのみ利用できます。"
-            " WSL では `uv run scripts/run_wav.py` でパイプラインを確認してください。"
-        )
+        console.print("[red]エラー:[/red] 音声取得は Windows でのみ利用できます。")
         raise typer.Exit(1)
 
 
