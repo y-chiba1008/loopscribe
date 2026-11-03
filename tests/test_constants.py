@@ -20,6 +20,8 @@ def test_audio_and_chunk_constants() -> None:
     assert constants.CHUNK_SECONDS == 30.0
     assert constants.OVERLAP_SECONDS == 3.0
     assert constants.MIN_TAIL_SECONDS == 1.0
+    assert constants.WASAPI_FRAMES_PER_BUFFER == 512
+    assert constants.WASAPI_QUEUE_POLL_SECONDS == 0.2
 
 
 def test_ui_and_output_constants() -> None:

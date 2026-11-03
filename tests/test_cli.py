@@ -3,13 +3,31 @@
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
+from loopscribe.audio.wasapi import OutputDeviceInfo
 from loopscribe.cli import app
+from loopscribe.errors import DeviceNotFoundError
 
 runner = CliRunner()
+
+
+def _fake_device() -> OutputDeviceInfo:
+    return OutputDeviceInfo(
+        index=5,
+        name="Speakers",
+        sample_rate=48_000,
+        channels=2,
+        is_default=True,
+        loopback_index=15,
+        loopback_name="Speakers [Loopback]",
+        loopback_sample_rate=48_000,
+        loopback_channels=2,
+    )
 
 
 def test_version() -> None:
@@ -51,3 +69,66 @@ def test_start_help_shows_options() -> None:
 def test_download_model_help() -> None:
     result = runner.invoke(app, ["download-model", "--help"])
     assert result.exit_code == 0
+
+
+def test_devices_lists_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    devices = [_fake_device()]
+    printed: list[object] = []
+
+    fake_wasapi = SimpleNamespace(
+        list_output_devices=lambda: devices,
+        print_device_list=lambda devs, console=None: printed.append((devs, console)),
+    )
+    monkeypatch.setattr("loopscribe.cli._load_wasapi", lambda: fake_wasapi)
+
+    result = runner.invoke(app, ["devices"])
+    assert result.exit_code == 0
+    assert printed
+    assert printed[0][0] == devices
+    assert isinstance(printed[0][1], Console)
+
+
+def test_devices_device_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    def _raise() -> list[OutputDeviceInfo]:
+        raise DeviceNotFoundError("ループバック可能な出力デバイスが見つかりません。")
+
+    fake_wasapi = SimpleNamespace(
+        list_output_devices=_raise,
+        print_device_list=lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr("loopscribe.cli._load_wasapi", lambda: fake_wasapi)
+
+    result = runner.invoke(app, ["devices"])
+    assert result.exit_code == 1
+    assert "エラー" in result.stdout
+
+
+def test_start_opens_loopback_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    opened: list[str | None] = []
+
+    class FakeSource:
+        sample_rate = 48_000
+        channels = 2
+
+        def __iter__(self):
+            return iter(())
+
+        def close(self) -> None:
+            return None
+
+    fake_wasapi = SimpleNamespace(
+        open_loopback_source=lambda device: opened.append(device) or FakeSource(),
+    )
+    monkeypatch.setattr("loopscribe.cli._load_wasapi", lambda: fake_wasapi)
+    monkeypatch.setattr(
+        "loopscribe.cli.run_transcription",
+        lambda source, console, output_dir: 0,
+    )
+
+    result = runner.invoke(app, ["start", "--device", "Speakers"])
+    assert result.exit_code == 0
+    assert opened == ["Speakers"]
