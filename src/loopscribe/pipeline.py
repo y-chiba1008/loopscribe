@@ -31,8 +31,10 @@ from loopscribe.constants import (
     OVERLAP_SECONDS,
     SAMPLE_RATE,
     SIGNAL_POLL_SECONDS,
+    UI_REFRESH_SECONDS,
 )
 from loopscribe.output import AbsoluteSegment, Sink
+from loopscribe.progress import ProgressReporter
 from loopscribe.transcriber import Segment, Transcriber
 
 
@@ -64,7 +66,9 @@ class TranscriptionPipeline:
         lag_warn_seconds: float = LAG_WARN_SECONDS,
         buffer_warn_mb: float = BUFFER_WARN_MB,
         wait_timeout: float = SIGNAL_POLL_SECONDS,
+        ui_refresh_seconds: float = UI_REFRESH_SECONDS,
         progress: PipelineProgress | None = None,
+        reporter: ProgressReporter | None = None,
         on_warning: Callable[[str], None] | None = None,
     ) -> None:
         self._source = source
@@ -79,7 +83,9 @@ class TranscriptionPipeline:
         self._lag_warn_seconds = lag_warn_seconds
         self._buffer_warn_mb = buffer_warn_mb
         self._wait_timeout = wait_timeout
+        self._ui_refresh_seconds = ui_refresh_seconds
         self._progress = progress if progress is not None else PipelineProgress()
+        self._reporter = reporter
         self._on_warning = on_warning
         self._buffer = AudioBuffer()
         self._lock = threading.Lock()
@@ -92,19 +98,38 @@ class TranscriptionPipeline:
         return self._progress
 
     def run(self) -> int:
-        """パイプラインを実行し、終了コードを返す(0=正常、1=取得失敗後の処理完了)。"""
+        """パイプラインを実行し、終了コードを返す(0=正常、1=取得失敗後の処理完了)。
+
+        メインスレッドは短いタイムアウトで join を繰り返し、プログレスを更新する。
+        (Windows でシグナル処理が遅れないようにするため。)
+        """
         capture = threading.Thread(target=self._capture_loop, name="capture", daemon=True)
         transcribe = threading.Thread(target=self._transcribe_loop, name="transcribe", daemon=True)
         capture.start()
         transcribe.start()
-        capture.join()
-        transcribe.join()
-        with contextlib.suppress(Exception):
-            self._sink.close()
-        with self._lock:
-            self._progress.done = True
-            self._progress.exit_code = 1 if self._capture_failed else 0
+        try:
+            while capture.is_alive() or transcribe.is_alive():
+                self._refresh_reporter()
+                if capture.is_alive():
+                    capture.join(timeout=self._ui_refresh_seconds)
+                else:
+                    transcribe.join(timeout=self._ui_refresh_seconds)
+            self._refresh_reporter()
+        finally:
+            with contextlib.suppress(Exception):
+                self._sink.close()
+            with self._lock:
+                self._progress.done = True
+                self._progress.exit_code = 1 if self._capture_failed else 0
         return self._progress.exit_code
+
+    def _refresh_reporter(self) -> None:
+        if self._reporter is None:
+            return
+        with self._lock:
+            processed = self._progress.processed_seconds
+            recorded = self._progress.recorded_seconds
+        self._reporter.update(processed, recorded)
 
     def _warn(self, message: str) -> None:
         if self._on_warning is not None:
