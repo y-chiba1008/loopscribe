@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import wave
 from datetime import datetime
 from io import StringIO
@@ -191,6 +192,69 @@ def test_pipeline_stop_event_ends_capture_and_flushes(tmp_path: Path) -> None:
     # stop 後も「現在のブロック」は処理されるので、全量よりは少ない
     assert source.blocks_yielded < 200
     assert progress.recorded_seconds > 0
+
+
+def test_pipeline_stop_while_source_silent_flushes_and_exits() -> None:
+    """ブロックが来ない(無音の WASAPI 相当)ときに stop しても、残りを出力して終わる。"""
+    stop = threading.Event()
+
+    class SilentAfterAudioSource:
+        """4秒分を返したあと、close されるまでブロックを返さずに待つ。"""
+
+        sample_rate = 16_000
+        channels = 1
+
+        def __init__(self) -> None:
+            self._closed = threading.Event()
+
+        def __iter__(self):
+            for _ in range(40):
+                yield np.zeros((1_600, 1), dtype=np.float32)
+            self._closed.wait()
+
+        def close(self) -> None:
+            self._closed.set()
+
+    lines: list[str] = []
+
+    class CollectSink:
+        def write(self, segment: AbsoluteSegment) -> None:
+            lines.append(segment.text)
+
+        def close(self) -> None:
+            return
+
+    fake = FakeTranscriber([[Segment(start=0.5, end=0.7, text="未出力")]])
+    stream = StringIO()
+    console = Console(file=stream, force_terminal=False, width=120, highlight=False)
+    pipeline = TranscriptionPipeline(
+        SilentAfterAudioSource(),
+        fake,
+        CollectSink(),
+        stop_event=stop,
+        console=console,
+        chunk_seconds=4.0,
+        overlap_seconds=1.0,
+        min_tail_seconds=1.0,
+        wait_timeout=0.05,
+        ui_refresh_seconds=0.05,
+    )
+    result: list[int] = []
+    runner = threading.Thread(target=lambda: result.append(pipeline.run()), daemon=True)
+    runner.start()
+
+    deadline = time.monotonic() + 5.0
+    while not fake.calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert fake.calls, "最初のチャンクが処理されていない"
+    # チャンク0の結果は次のチャンク待ちで保留されている
+    assert lines == []
+
+    stop.set()
+    runner.join(timeout=5.0)
+    assert not runner.is_alive(), "stop 後にパイプラインが終了しない"
+    assert result == [0]
+    assert lines == ["未出力"]
 
 
 def test_pipeline_writes_txt(tmp_path: Path) -> None:
