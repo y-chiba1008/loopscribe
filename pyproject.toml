@@ -15,9 +15,6 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 
-# 要確認: 下限バージョンは目安。`uv lock` で解決し、Python 3.13 / Windows 向けの
-# wheel が揃うか(特に pyaudiowpatch, soxr)を最初に確認すること。
-# pyaudiowpatch が 3.13 で使えない場合の代替案は docs/requirements-and-design.md を参照。
 dependencies = [
     "faster-whisper>=1.1.0",
     # 1.2.1 は av.open(metadata_errors=...) を渡す。PyAV 19 で引数が削除され、

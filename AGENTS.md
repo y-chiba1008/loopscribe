@@ -8,7 +8,7 @@
 
 `loopscribe`: Windowsのシステム音声(WASAPIループバック)を、ローカルで日本語に文字起こしするCLI。
 faster-whisper(CPU / int8)+ Whisper `small`。GPUなし・従量課金なし。
-`uv tool install` で配布するPythonパッケージ。現在は設計済み・未実装の状態。
+`uv tool install` で配布するPythonパッケージ。
 
 ## 守るべき決定事項(変更する場合は、ユーザーに確認すること)
 
@@ -38,7 +38,7 @@ uv run scripts/prepare_bench_audio.py  # 検証用wavと正解テキストを sc
 uv run scripts/bench_models.py scripts/data/sample.wav --reference scripts/data/sample.txt
 ```
 
-## ディレクトリ構成(目標)
+## ディレクトリ構成
 
 ```
 src/loopscribe/
@@ -59,6 +59,7 @@ src/loopscribe/
 └── progress.py       # プログレスバー(rich)
 scripts/bench_models.py          # モデル検証用(単体で動く。PEP 723)
 scripts/prepare_bench_audio.py   # 検証用wavの作成(ReazonSpeech。生成物は scripts/data/ で gitignore)
+scripts/run_wav.py               # 本番と同じパイプラインでwavを流す(WSLでの手動確認用)
 tests/
 ```
 
@@ -75,6 +76,7 @@ tests/
 - **Ctrl+Cの扱い**: メインスレッドはイベント待ちのループ(`Event.wait(timeout)` を短い間隔で繰り返す)にし、
   文字起こしは別スレッドで実行する(ネイティブの推論呼び出し中はPythonのシグナル処理が遅れるため)。
   1回目: 録音を止めて、バックログを処理してから終了。2回目: sinkをflushして `os._exit(130)`。
+- wavを流す開発用の機能は `scripts/run_wav.py` に置き、**CLIオプションにはしない**。
 - 型ヒントを付ける。`ruff` の指摘は残さない。コメントとdocstringは日本語でよい。
 
 ## テスト
@@ -85,23 +87,6 @@ tests/
 - テスト用のwavは数秒の短いものにして `tests/data/` に置く。**著作権・プライバシーに問題のない音声**だけを使う
   (音声ファイルは、ユーザーが用意する想定)。
 
-## 実装の推奨順序
-
-1. `constants.py`、`errors.py`、`chunker.py`、`buffer.py`、出力の整形 + 単体テスト
-2. `WavFileSource`、`convert.py`、`pipeline.py`(偽のTranscriberで通す)
-3. faster-whisper実装の `Transcriber` と `model.py` + slowテスト
-4. `progress.py` と `cli.py`。WSLでの手動確認用に、同じパイプラインでwavを流す開発用スクリプト
-   `scripts/run_wav.py` を作る(**CLIオプションにはしない**)
-5. `wasapi.py` と `devices` サブコマンド(Windows実機が必要)
-6. Windows実機での検証(下記)
-
-## Windows実機で確認が必要なこと
-
-- 無音のときにループバックのコールバックが来ない場合の挙動(タイムスタンプが実時間とずれる可能性)
-- 出力デバイスの切り替え・切断時の挙動
-- Ctrl+Cの2段階動作、長時間(数時間)の実行時のメモリ
-- `uv tool install git+...` でのインストールと、Python 3.13向けwheel(`pyaudiowpatch`、`soxr`)の有無
-
 ## やらないこと
 
 - 上記の「守るべき決定事項」に反する変更(オプションの追加、バックログの破棄など)を、確認なしに入れること
@@ -110,7 +95,8 @@ tests/
 
 ## 未確定事項
 
-設計資料の「リスク・未確定事項」を参照してください。決まった内容は、設計資料の決定ログに追記してください。
+未確定事項・検証待ちの項目・既知の不具合は、GitHubのissueで管理します(`gh issue list`)。
+決まった内容は、設計資料の決定ログに追記してください。
 
 ## その他
 技術的な知見は /home/chiba/workspaces/knowledge-base を参照すること。
