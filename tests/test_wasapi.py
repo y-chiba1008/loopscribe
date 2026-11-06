@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -123,6 +125,26 @@ def test_wasapi_source_iterates_queued_blocks() -> None:
     blocks = list(source)
     assert len(blocks) == 1
     assert blocks[0].shape == (1, 2)
+
+
+def test_wasapi_source_close_from_other_thread_ends_silent_iteration() -> None:
+    """無音でキューが空のままでも、別スレッドからの close で反復が終わる。"""
+    info = _device(index=5, name="Speakers", is_default=True)
+    source = WasapiLoopbackSource(info, queue_poll_seconds=0.05)
+    source._ensure_started = lambda: None  # type: ignore[method-assign]
+    source._started = True
+    source._stream = MagicMock(is_active=MagicMock(return_value=True))
+
+    blocks: list[np.ndarray] = []
+    reader = threading.Thread(target=lambda: blocks.extend(source), daemon=True)
+    reader.start()
+    time.sleep(0.2)
+    assert reader.is_alive()
+
+    source.close()
+    reader.join(timeout=2.0)
+    assert not reader.is_alive()
+    assert blocks == []
 
 
 def test_wasapi_source_raises_when_stream_stops() -> None:

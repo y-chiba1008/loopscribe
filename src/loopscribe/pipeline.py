@@ -107,9 +107,15 @@ class TranscriptionPipeline:
         transcribe = threading.Thread(target=self._transcribe_loop, name="transcribe", daemon=True)
         capture.start()
         transcribe.start()
+        source_closed = False
         try:
             while capture.is_alive() or transcribe.is_alive():
                 self._refresh_reporter()
+                if self._stop_event.is_set() and not source_closed:
+                    # 無音時の WASAPI はブロックを返さず、capture 側が停止に気づけない
+                    source_closed = True
+                    with contextlib.suppress(Exception):
+                        self._source.close()
                 if capture.is_alive():
                     capture.join(timeout=self._ui_refresh_seconds)
                 else:

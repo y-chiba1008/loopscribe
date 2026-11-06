@@ -46,6 +46,19 @@ def test_wavfile_source_reads_blocks(tmp_path: Path) -> None:
     assert np.max(np.abs(joined - mono)) < 2 / 32768
 
 
+def test_wavfile_source_close_during_iteration_stops_cleanly(tmp_path: Path) -> None:
+    """反復中に close しても例外にならず、以降のブロックは返さない。"""
+    path = tmp_path / "long.wav"
+    rate = 16_000
+    _write_pcm16_wav(path, np.zeros(rate * 2, dtype=np.float32), sample_rate=rate, channels=1)
+
+    source = WavFileSource(path, block_frames=1000)
+    it = iter(source)
+    next(it)
+    source.close()
+    assert list(it) == []
+
+
 def test_wavfile_source_rejects_non_pcm16(tmp_path: Path) -> None:
     path = tmp_path / "bad.wav"
     with wave.open(str(path), "wb") as wf:

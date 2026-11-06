@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import wave
 from collections.abc import Iterator
 from pathlib import Path
@@ -41,6 +42,7 @@ class WavFileSource:
             self._wf.close()
             raise
         self._closed = False
+        self._lock = threading.Lock()
 
     @property
     def sample_rate(self) -> int:
@@ -53,8 +55,11 @@ class WavFileSource:
     def __iter__(self) -> Iterator[NDArray[np.float32]]:
         if self._closed:
             raise ValueError("close 済みの WavFileSource は読めない")
-        while not self._closed:
-            raw = self._wf.readframes(self._block_frames)
+        while True:
+            with self._lock:
+                if self._closed:
+                    break
+                raw = self._wf.readframes(self._block_frames)
             if not raw:
                 break
             samples = np.frombuffer(raw, dtype="<i2").astype(np.float32)
@@ -65,7 +70,8 @@ class WavFileSource:
             yield samples.reshape(frames, self._channels)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._wf.close()
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._wf.close()
