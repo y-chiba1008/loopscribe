@@ -288,12 +288,12 @@ RTF>1のモデルを選ぶ場合は、想定する録音時間と、終了後に
 | # | 内容 | 対応案 |
 |---|---|---|
 | 1 | (解決済み)kotoba-whisperが、このCPUでは遅すぎる可能性 | 対象PCでRTF 1.6〜2.2だったため、`small` に決定(決定ログ#17) |
-| 2 | Python 3.13向けのwheel(`pyaudiowpatch`、`soxr`)が揃わない可能性 | `uv lock` で最初に確認。`pyaudiowpatch` が使えない場合の代替は `soundcard`(純Python。`include_loopback=True` でWindowsのループバックを取得できる)。AudioSourceの差し替えで吸収できる |
+| 2 | (解決済み)Python 3.13向けのwheel(`pyaudiowpatch`、`soxr`)が揃わない可能性 | Windows実機で `uv tool install` と `download-model` が通ることを確認した(Issue #6)。`pyaudiowpatch` が将来使えなくなった場合の代替は `soundcard`(純Python。`include_loopback=True` でWindowsのループバックを取得できる)。AudioSourceの差し替えで吸収できる |
 | 3 | 無音時にコールバックが来ず、タイムスタンプがずれる | §6.4。Windows実機で確認し、必要なら無音サンプルを挿入する |
-| 4 | (解決済み)実行中のデバイス切断時の挙動 | §9のとおり確定(2026-11-02)。実機での動作確認のみ残る |
+| 4 | (解決済み)実行中のデバイス切断時の挙動 | §9のとおり確定(2026-11-02)。Windows実機で、警告・録音停止・バックログ処理・終了コード1の動作を確認した(Issue #6) |
 | 5 | 重複除去(§6.6)は設計者の推奨案 | 実装時にテストで確認し、問題があれば別案(テキスト一致)を検討する |
-| 6 | ライブラリのバージョン下限(`pyproject.toml`)は目安 | `uv lock` で解決した結果を確認する |
-| 7 | 長時間実行(数時間)のメモリ・安定性が未検証 | Windows実機で検証する |
+| 6 | (解決済み)ライブラリのバージョン下限(`pyproject.toml`)は目安 | `uv lock` で解決し、WSLとWindows実機で動作を確認した。`av` の上限固定(`<19`)は、faster-whisperの修正リリース後に外す(Issue #24) |
+| 7 | 長時間実行(数時間)のメモリ・安定性が未検証 | Windows実機で検証する。実利用中に問題が起きてから対処する(Issue #23) |
 
 ## 12. 将来拡張
 
