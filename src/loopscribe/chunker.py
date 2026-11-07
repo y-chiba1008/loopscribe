@@ -21,10 +21,13 @@ class ChunkSpan:
 
 @dataclass(frozen=True)
 class OwnershipBounds:
-    """チャンクが採用するセグメントの絶対開始時刻の範囲 [lo, hi)。"""
+    """チャンクが採用する語(語が無いセグメントはセグメント)の絶対開始時刻の範囲 [lo, hi)。"""
 
     lo: float
     hi: float
+
+    def contains(self, absolute_start: float) -> bool:
+        return self.lo <= absolute_start < self.hi
 
 
 def step_seconds(chunk_seconds: float, overlap_seconds: float) -> float:
@@ -106,14 +109,14 @@ def owns_segment(
     chunk_seconds: float = CHUNK_SECONDS,
     overlap_seconds: float = OVERLAP_SECONDS,
 ) -> bool:
-    """セグメントの絶対開始時刻がチャンク index の担当なら True。"""
+    """絶対開始時刻がチャンク index の担当なら True。"""
     bounds = ownership_bounds(
         index,
         is_last=is_last,
         chunk_seconds=chunk_seconds,
         overlap_seconds=overlap_seconds,
     )
-    return bounds.lo <= absolute_start < bounds.hi
+    return bounds.contains(absolute_start)
 
 
 def tail_span_after_stop(

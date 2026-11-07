@@ -20,12 +20,25 @@ from loopscribe.constants import (
 
 
 @dataclass(frozen=True)
-class Segment:
-    """チャンク内の相対時刻を持つセグメント。"""
+class Word:
+    """チャンク内の相対時刻を持つ語。text は前後の空白を含めてそのまま持つ。"""
 
     start: float
     end: float
     text: str
+
+
+@dataclass(frozen=True)
+class Segment:
+    """チャンク内の相対時刻を持つセグメント。
+
+    words は担当チャンクの判定に使う(空なら、セグメントの開始時刻で判定する)。
+    """
+
+    start: float
+    end: float
+    text: str
+    words: tuple[Word, ...] = ()
 
 
 class Transcriber(Protocol):
@@ -95,11 +108,17 @@ class FasterWhisperTranscriber:
             beam_size=self._beam_size,
             vad_filter=self._vad_filter,
             condition_on_previous_text=self._condition_on_previous_text,
+            word_timestamps=True,
         )
         result: list[Segment] = []
         for seg in raw_segments:
             text = seg.text.strip()
             if not text:
                 continue
-            result.append(Segment(start=float(seg.start), end=float(seg.end), text=text))
+            words = tuple(
+                Word(start=float(w.start), end=float(w.end), text=w.word) for w in seg.words or ()
+            )
+            result.append(
+                Segment(start=float(seg.start), end=float(seg.end), text=text, words=words)
+            )
         return result

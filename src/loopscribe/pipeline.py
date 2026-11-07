@@ -16,10 +16,11 @@ from loopscribe.audio.source import AudioSource
 from loopscribe.buffer import AudioBuffer
 from loopscribe.chunker import (
     ChunkSpan,
+    OwnershipBounds,
     chunk_ready_at,
     chunk_span,
     is_chunk_ready,
-    owns_segment,
+    ownership_bounds,
     step_seconds,
     tail_span_after_stop,
 )
@@ -36,6 +37,34 @@ from loopscribe.constants import (
 from loopscribe.output import AbsoluteSegment, Sink
 from loopscribe.progress import ProgressReporter
 from loopscribe.transcriber import Segment, Transcriber
+
+
+def owned_part(
+    segment: Segment,
+    *,
+    chunk_start: float,
+    bounds: OwnershipBounds,
+) -> AbsoluteSegment | None:
+    """セグメントのうち、チャンクの担当範囲に入る部分を絶対時刻で返す(無ければ None)。
+
+    語があれば、絶対開始時刻が担当範囲に入る語だけを採用する。語が無ければ、
+    セグメントの開始時刻で判定する。
+    """
+    if not segment.words:
+        start = chunk_start + segment.start
+        if not bounds.contains(start):
+            return None
+        return AbsoluteSegment(start=start, end=chunk_start + segment.end, text=segment.text)
+
+    words = [w for w in segment.words if bounds.contains(chunk_start + w.start)]
+    text = "".join(w.text for w in words).strip()
+    if not text:
+        return None
+    return AbsoluteSegment(
+        start=chunk_start + words[0].start,
+        end=chunk_start + words[-1].end,
+        text=text,
+    )
 
 
 @dataclass
@@ -300,17 +329,16 @@ class TranscriptionPipeline:
         *,
         is_last: bool,
     ) -> None:
+        bounds = ownership_bounds(
+            span.index,
+            is_last=is_last,
+            chunk_seconds=self._chunk_seconds,
+            overlap_seconds=self._overlap_seconds,
+        )
         for seg in segments:
-            abs_start = span.start + seg.start
-            abs_end = span.start + seg.end
-            if owns_segment(
-                abs_start,
-                span.index,
-                is_last=is_last,
-                chunk_seconds=self._chunk_seconds,
-                overlap_seconds=self._overlap_seconds,
-            ):
-                self._sink.write(AbsoluteSegment(start=abs_start, end=abs_end, text=seg.text))
+            owned = owned_part(seg, chunk_start=span.start, bounds=bounds)
+            if owned is not None:
+                self._sink.write(owned)
         with self._lock:
             self._progress.processed_seconds = min(
                 span.end,

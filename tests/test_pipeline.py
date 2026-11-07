@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 import wave
@@ -14,9 +15,10 @@ import pytest
 from rich.console import Console
 
 from loopscribe.audio.wavfile import WavFileSource
+from loopscribe.chunker import OwnershipBounds
 from loopscribe.output import AbsoluteSegment, ConsoleSink, MultiSink, TxtSink
-from loopscribe.pipeline import PipelineProgress, TranscriptionPipeline
-from loopscribe.transcriber import FakeTranscriber, Segment
+from loopscribe.pipeline import PipelineProgress, TranscriptionPipeline, owned_part
+from loopscribe.transcriber import FakeTranscriber, Segment, Word
 
 
 def _write_silence_wav(path: Path, *, seconds: float, sample_rate: int = 16_000) -> None:
@@ -91,6 +93,104 @@ def test_pipeline_emits_owned_segments_without_dupes(tmp_path: Path) -> None:
     assert lines == ["前半", "境界A", "後半"]
     assert progress.processed_seconds == pytest.approx(7.0, abs=0.05)
     assert len(fake.calls) >= 2
+
+
+def _words(chunk_start: float, *items: tuple[float, str]) -> tuple[Word, ...]:
+    """(絶対開始秒, 文字列) の列から、チャンク内の相対時刻の語を作る(長さは0.2秒)。"""
+    return tuple(Word(start=t - chunk_start, end=t - chunk_start + 0.2, text=s) for t, s in items)
+
+
+def test_owned_part_keeps_only_words_in_bounds() -> None:
+    seg = Segment(
+        start=2.8,
+        end=4.1,
+        text="あいうえ",
+        words=_words(0.0, (2.8, "あ"), (3.2, "い"), (3.6, "う"), (3.9, "え")),
+    )
+    owned = owned_part(seg, chunk_start=0.0, bounds=OwnershipBounds(lo=0.0, hi=3.5))
+    assert owned is not None
+    assert owned.start == pytest.approx(2.8)
+    assert owned.end == pytest.approx(3.4)
+    assert owned.text == "あい"
+
+
+def test_owned_part_uses_first_owned_word_start_and_strips() -> None:
+    seg = Segment(
+        start=0.1,
+        end=1.1,
+        text="いうえ",
+        words=_words(3.0, (3.2, " い"), (3.6, " う"), (3.9, "え ")),
+    )
+    owned = owned_part(seg, chunk_start=3.0, bounds=OwnershipBounds(lo=3.5, hi=math.inf))
+    assert owned is not None
+    assert owned.start == pytest.approx(3.6)
+    assert owned.end == pytest.approx(4.1)
+    assert owned.text == "うえ"
+
+
+def test_owned_part_returns_none_when_no_word_in_bounds() -> None:
+    seg = Segment(start=0.1, end=0.5, text="い", words=_words(3.0, (3.2, "い")))
+    assert owned_part(seg, chunk_start=3.0, bounds=OwnershipBounds(lo=3.5, hi=math.inf)) is None
+
+
+def test_owned_part_returns_none_when_owned_words_are_blank() -> None:
+    seg = Segment(start=0.6, end=1.0, text="x", words=_words(3.0, (3.6, " "), (3.9, "")))
+    assert owned_part(seg, chunk_start=3.0, bounds=OwnershipBounds(lo=3.5, hi=math.inf)) is None
+
+
+def test_owned_part_falls_back_to_segment_start_without_words() -> None:
+    seg = Segment(start=0.6, end=0.8, text="境界")
+    bounds = OwnershipBounds(lo=3.5, hi=math.inf)
+    assert owned_part(seg, chunk_start=3.0, bounds=bounds) == AbsoluteSegment(
+        start=3.6, end=3.8, text="境界"
+    )
+    assert owned_part(seg, chunk_start=2.0, bounds=bounds) is None
+
+
+def test_pipeline_splits_boundary_segment_by_words(tmp_path: Path) -> None:
+    """境目をまたぐセグメントは語単位で分かれ、重複も欠落も出ない。"""
+    wav = tmp_path / "w.wav"
+    _write_silence_wav(wav, seconds=7.0)
+
+    # chunk=4, overlap=1, step=3。chunk0 [0, 4] の担当 [0, 3.5)、chunk1 [3, 7] の担当 [3.5, inf)
+    # 両チャンクとも、境目をまたぐ発話を1つのセグメントとして返す。
+    # chunk1 のセグメントの開始(abs 3.1)は chunk0 の担当範囲に寄っている(Issue #12 の状況)
+    fake = FakeTranscriber(
+        [
+            [
+                Segment(start=1.0, end=1.4, text="前半", words=_words(0.0, (1.0, "前半"))),
+                Segment(
+                    start=2.8,
+                    end=4.0,
+                    text="あいうえ",
+                    words=_words(0.0, (2.8, "あ"), (3.2, "い"), (3.6, "う"), (3.8, "え")),
+                ),
+            ],
+            [
+                Segment(
+                    start=0.1,
+                    end=1.1,
+                    text="いうえお",
+                    words=_words(3.0, (3.2, "い"), (3.6, "う"), (3.8, "え"), (4.0, "お")),
+                ),
+                Segment(start=2.0, end=2.4, text="後半", words=_words(3.0, (5.0, "後半"))),
+            ],
+        ]
+    )
+    segments: list[AbsoluteSegment] = []
+
+    class CollectSink:
+        def write(self, segment: AbsoluteSegment) -> None:
+            segments.append(segment)
+
+        def close(self) -> None:
+            return
+
+    code, _lines, _progress = _run_pipeline(wav, fake, sink=CollectSink())
+    assert code == 0
+    assert [s.text for s in segments] == ["前半", "あい", "うえお", "後半"]
+    assert [s.start for s in segments] == pytest.approx([1.0, 2.8, 3.6, 5.0])
+    assert "".join(s.text for s in segments) == "前半あいうえお後半"
 
 
 def test_pipeline_processes_tail_chunk(tmp_path: Path) -> None:

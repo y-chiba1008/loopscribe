@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from loopscribe.transcriber import FasterWhisperTranscriber, Segment
+from loopscribe.transcriber import FasterWhisperTranscriber, Segment, Word
 
 
 def test_segment_fields() -> None:
@@ -16,13 +16,22 @@ def test_segment_fields() -> None:
     assert seg.start == 1.0
     assert seg.end == 2.5
     assert seg.text == "こんにちは"
+    assert seg.words == ()
 
 
 def test_faster_whisper_transcriber_maps_segments() -> None:
     raw = [
-        SimpleNamespace(start=0.0, end=1.0, text="  こんにちは  "),
-        SimpleNamespace(start=1.5, end=2.0, text="   "),
-        SimpleNamespace(start=2.0, end=3.0, text="世界"),
+        SimpleNamespace(
+            start=0.0,
+            end=1.0,
+            text="  こんにちは  ",
+            words=[
+                SimpleNamespace(start=0.0, end=0.4, word=" こん", probability=0.9),
+                SimpleNamespace(start=0.4, end=1.0, word="にちは", probability=0.9),
+            ],
+        ),
+        SimpleNamespace(start=1.5, end=2.0, text="   ", words=[]),
+        SimpleNamespace(start=2.0, end=3.0, text="世界", words=None),
     ]
     mock_model = MagicMock()
     mock_model.transcribe.return_value = (iter(raw), SimpleNamespace())
@@ -40,7 +49,12 @@ def test_faster_whisper_transcriber_maps_segments() -> None:
     segments = tr.transcribe(samples)
 
     assert segments == [
-        Segment(start=0.0, end=1.0, text="こんにちは"),
+        Segment(
+            start=0.0,
+            end=1.0,
+            text="こんにちは",
+            words=(Word(start=0.0, end=0.4, text=" こん"), Word(start=0.4, end=1.0, text="にちは")),
+        ),
         Segment(start=2.0, end=3.0, text="世界"),
     ]
     kwargs = mock_model.transcribe.call_args.kwargs
@@ -48,6 +62,7 @@ def test_faster_whisper_transcriber_maps_segments() -> None:
     assert kwargs["beam_size"] == 1
     assert kwargs["vad_filter"] is True
     assert kwargs["condition_on_previous_text"] is False
+    assert kwargs["word_timestamps"] is True
 
 
 def test_faster_whisper_transcriber_rejects_non_mono() -> None:
