@@ -9,7 +9,7 @@ from typing import Protocol, TextIO
 
 from rich.console import Console
 
-from loopscribe.constants import MODEL_NAME, OUTPUT_ENCODING
+from loopscribe.constants import OUTPUT_ENCODING
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,7 @@ def format_line(start_seconds: float, text: str) -> str:
 def format_header(
     started_at: datetime,
     *,
-    model_name: str = MODEL_NAME,
+    model_name: str,
 ) -> str:
     """txt 先頭のヘッダ行。"""
     stamp = started_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -78,7 +78,7 @@ class TxtSink:
         path: Path | str,
         *,
         started_at: datetime,
-        model_name: str = MODEL_NAME,
+        model_name: str,
         encoding: str = OUTPUT_ENCODING,
     ) -> None:
         self._path = Path(path)

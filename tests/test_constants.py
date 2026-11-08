@@ -2,17 +2,36 @@
 
 from __future__ import annotations
 
+import importlib
+
+import pytest
+
 from loopscribe import constants
 
 
-def test_model_and_inference_constants() -> None:
-    assert constants.MODEL_NAME == "small"
-    assert constants.COMPUTE_TYPE == "int8"
-    assert constants.CPU_THREADS == 4
+def test_language_constant() -> None:
     assert constants.LANGUAGE == "ja"
-    assert constants.BEAM_SIZE == 1
-    assert constants.VAD_FILTER is True
-    assert constants.CONDITION_ON_PREVIOUS_TEXT is False
+
+
+def test_model_constants_are_not_in_constants() -> None:
+    for name in ("MODEL_NAME", "COMPUTE_TYPE", "BEAM_SIZE", "VAD_FILTER"):
+        assert not hasattr(constants, name)
+
+
+@pytest.mark.parametrize(
+    ("cpu_count", "expected"),
+    [(8, 4), (12, 6), (1, 1), (None, 1)],
+)
+def test_cpu_threads_is_half_of_logical_cores(
+    monkeypatch: pytest.MonkeyPatch, cpu_count: int | None, expected: int
+) -> None:
+    monkeypatch.setattr("os.cpu_count", lambda: cpu_count)
+    try:
+        threads = importlib.reload(constants).CPU_THREADS
+        assert threads == expected
+    finally:
+        monkeypatch.undo()
+        importlib.reload(constants)
 
 
 def test_audio_and_chunk_constants() -> None:

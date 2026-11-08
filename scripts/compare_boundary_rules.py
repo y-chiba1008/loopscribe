@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """開発用: チャンクの境目での取りこぼしへの対処の候補を比べる(Issue #12)。
 
-重なりの長さごとに、本番と同じ推論条件(constants の値)で各チャンクを1回だけ推論し、
+重なりの長さごとに、本番と同じ推論条件(small の固定値)で各チャンクを1回だけ推論し、
 セグメントを --out-dir に保存する。
 担当を決める規則は、保存したセグメントに後から当てはめて比べる。
 本番のコードは変えない。
@@ -39,15 +39,17 @@ from bench_models import align, normalize_for_cer, normalize_reference  # noqa: 
 from eval_boundary import production_spans, score_lines  # noqa: E402
 from loopscribe.chunker import ChunkSpan, ownership_bounds  # noqa: E402
 from loopscribe.constants import (  # noqa: E402
-    BEAM_SIZE,
     CHUNK_SECONDS,
-    COMPUTE_TYPE,
-    CONDITION_ON_PREVIOUS_TEXT,
     CPU_THREADS,
     LANGUAGE,
     MIN_TAIL_SECONDS,
-    MODEL_NAME,
     SAMPLE_RATE,
+)
+from loopscribe.models.small import (  # noqa: E402
+    BEAM_SIZE,
+    COMPUTE_TYPE,
+    CONDITION_ON_PREVIOUS_TEXT,
+    REPO_ID,
     VAD_FILTER,
 )
 from loopscribe.output import AbsoluteSegment, format_line  # noqa: E402
@@ -89,13 +91,13 @@ def read_wav(path: Path) -> np.ndarray:
 
 
 def make_transcribe(word_timestamps: bool) -> Callable[[np.ndarray], list[RawSegment]]:
-    """FasterWhisperTranscriber と同じ条件で推論する関数を作る。"""
+    """SmallTranscriber と同じ条件で推論する関数を作る。"""
     from faster_whisper import WhisperModel
 
     from loopscribe.model import ensure_model
 
     model = WhisperModel(
-        str(ensure_model(MODEL_NAME)),
+        str(ensure_model(REPO_ID)),
         device="cpu",
         compute_type=COMPUTE_TYPE,
         cpu_threads=CPU_THREADS,
