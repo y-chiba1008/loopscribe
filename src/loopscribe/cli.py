@@ -1,13 +1,15 @@
-"""Typer による CLI。サブコマンド: start / record / download-model / devices。"""
+"""Typer による CLI。サブコマンド: start / record / transcribe / download-model / devices。"""
 
 from __future__ import annotations
 
 import contextlib
 import importlib.metadata
+import math
 import os
 import signal
 import sys
 import threading
+import wave
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from enum import StrEnum
@@ -18,9 +20,16 @@ import typer
 from rich.console import Console
 
 from loopscribe.audio.source import AudioSource
-from loopscribe.constants import OUTPUT_NAME_FORMAT, RECORDING_SUFFIX, TRANSCRIPT_SUFFIX
+from loopscribe.audio.wavfile import WavFileSource
+from loopscribe.constants import (
+    FILE_READ_AHEAD_SECONDS,
+    OUTPUT_NAME_FORMAT,
+    RECORDING_SUFFIX,
+    TRANSCRIPT_SUFFIX,
+)
 from loopscribe.errors import FatalStartupError, InvalidOutputNameError, ModelUnavailableError
 from loopscribe.models import DEFAULT_MODEL, MODELS, get_model
+from loopscribe.models.base import ModelSpec
 from loopscribe.output import (
     ConsoleSink,
     MultiSink,
@@ -29,8 +38,14 @@ from loopscribe.output import (
     unique_output_path,
 )
 from loopscribe.pipeline import PipelineProgress, TranscriptionPipeline
-from loopscribe.progress import ProgressReporter, RecordingReporter, model_loading_status
+from loopscribe.progress import (
+    ProgressReporter,
+    RecordingReporter,
+    format_duration,
+    model_loading_status,
+)
 from loopscribe.recorder import Recorder, WavWriter
+from loopscribe.transcriber import Transcriber
 
 app = typer.Typer(
     name="loopscribe",
@@ -202,6 +217,39 @@ def _handle_sigint(
         signal.signal(signal.SIGINT, previous)
 
 
+def _load_transcriber(console: Console, model_name: str) -> tuple[ModelSpec, Transcriber] | None:
+    """モデルを取得して読み込む。取得できなければエラーを出して None。"""
+    try:
+        spec = get_model(model_name)
+        model_path = spec.ensure()
+    except (ValueError, ModelUnavailableError) as exc:
+        console.print(f"[red]エラー:[/red] {exc}")
+        return None
+
+    with model_loading_status(console, model_name=spec.repo_id):
+        transcriber = spec.load(model_path)
+    return spec, transcriber
+
+
+def _open_txt_sink(
+    console: Console,
+    txt_path: Path,
+    *,
+    started_at: datetime,
+    model_name: str,
+    input_name: str | None = None,
+) -> TxtSink:
+    """txt を新規作成する。モデルの読み込み中に同名のファイルが作られていたら、連番を付け直す。"""
+    txt_path.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            return TxtSink(
+                txt_path, started_at=started_at, model_name=model_name, input_name=input_name
+            )
+        except FileExistsError:
+            txt_path = resolve_output_path(console, txt_path.parent, txt_path.stem, txt_path.suffix)
+
+
 def run_transcription(
     source: AudioSource,
     *,
@@ -211,35 +259,24 @@ def run_transcription(
     output_path: Path | None = None,
     stop_event: threading.Event | None = None,
 ) -> int:
-    """AudioSource から文字起こしを実行する(CLI と開発用スクリプトの共通経路)。
+    """システム音声の AudioSource から文字起こしを実行する(`start`)。
 
     `output_path` は `resolve_output_path` で決めた txt のパス。
     未指定なら、開始時刻から `OUTPUT_NAME_FORMAT` で作り、`output_dir` に置く。
     """
     stop = stop_event if stop_event is not None else threading.Event()
 
-    try:
-        spec = get_model(model_name)
-        model_path = spec.ensure()
-    except (ValueError, ModelUnavailableError) as exc:
-        console.print(f"[red]エラー:[/red] {exc}")
+    loaded = _load_transcriber(console, model_name)
+    if loaded is None:
         return 1
-
-    with model_loading_status(console, model_name=spec.repo_id):
-        transcriber = spec.load(model_path)
+    spec, transcriber = loaded
 
     started_at = datetime.now()
     txt_path = output_path or resolve_output_path(
         console, output_dir, started_at.strftime(OUTPUT_NAME_FORMAT), TRANSCRIPT_SUFFIX
     )
-    txt_path.parent.mkdir(parents=True, exist_ok=True)
-    while True:
-        try:
-            txt_sink = TxtSink(txt_path, started_at=started_at, model_name=spec.repo_id)
-            break
-        except FileExistsError:
-            # モデルの読み込み中に、同名のファイルが作られた場合
-            txt_path = resolve_output_path(console, txt_path.parent, txt_path.stem, txt_path.suffix)
+    txt_sink = _open_txt_sink(console, txt_path, started_at=started_at, model_name=spec.repo_id)
+    txt_path = txt_sink.path
 
     sink = MultiSink([ConsoleSink(console), txt_sink])
     with _handle_sigint(
@@ -260,6 +297,78 @@ def run_transcription(
                 reporter=reporter,
             )
             return pipeline.run()
+
+
+def run_file_transcription(
+    source: WavFileSource,
+    *,
+    console: Console,
+    input_path: Path,
+    output_path: Path,
+    model_name: str = DEFAULT_MODEL,
+    stop_event: threading.Event | None = None,
+) -> int:
+    """wav ファイルを文字起こしする(`transcribe`)。
+
+    Ctrl+C 1回目で、処理中のチャンクを終えてそこまでを出力し、終了コード130を返す。
+    """
+    stop = stop_event if stop_event is not None else threading.Event()
+    total_seconds = source.duration_seconds
+
+    loaded = _load_transcriber(console, model_name)
+    if loaded is None:
+        with contextlib.suppress(Exception):
+            source.close()
+        return 1
+    spec, transcriber = loaded
+
+    started_at = datetime.now()
+    txt_sink = _open_txt_sink(
+        console,
+        output_path,
+        started_at=started_at,
+        model_name=spec.repo_id,
+        input_name=input_path.name,
+    )
+    sink = MultiSink([ConsoleSink(console), txt_sink])
+    with _handle_sigint(
+        console,
+        stop,
+        first_message="処理中のチャンクを終えて終了します...",
+        on_force_exit=sink.close,
+    ):
+        console.print(f"文字起こしを開始します ({started_at.strftime('%Y-%m-%d %H:%M:%S')})")
+        console.print(f"入力: {input_path} (音声 {format_duration(total_seconds)})")
+        console.print(f"出力: {txt_sink.path}")
+
+        progress = PipelineProgress()
+        with ProgressReporter(console, total_seconds=total_seconds) as reporter:
+            pipeline = TranscriptionPipeline(
+                source,
+                transcriber,
+                sink,
+                stop_event=stop,
+                console=console,
+                lag_warn_seconds=0.0,
+                buffer_warn_mb=math.inf,
+                read_ahead_seconds=FILE_READ_AHEAD_SECONDS,
+                process_backlog_on_stop=False,
+                progress=progress,
+                reporter=reporter,
+            )
+            code = pipeline.run()
+            interrupted = code == 0 and stop.is_set()
+            if code == 0 and not interrupted:
+                reporter.update(total_seconds, total_seconds)
+
+        if interrupted:
+            console.print(
+                f"中断しました(処理済み {format_duration(progress.processed_seconds)}"
+                f" / 音声 {format_duration(total_seconds)}): {txt_sink.path}"
+            )
+            return 130
+        console.print(f"文字起こしを終了しました: {txt_sink.path}")
+        return code
 
 
 def run_recording(
@@ -357,6 +466,57 @@ def start_cmd(
         output_dir=output_dir,
         model_name=model.value,
         output_path=txt_path,
+    )
+    raise typer.Exit(code)
+
+
+@app.command("transcribe")
+def transcribe_cmd(
+    filename: Annotated[
+        Path,
+        typer.Argument(
+            help="文字起こしする wav ファイル(16bit PCM)", metavar="FILENAME", show_default=False
+        ),
+    ],
+    output_dir: OutputDirOption = Path("."),
+    output_name: Annotated[
+        str | None,
+        typer.Option(
+            "-n",
+            "--output-name",
+            help=(
+                "出力ファイルの名前(拡張子なし。末尾の .txt / .wav は取り除く)。"
+                "同名のファイルがあれば _2, _3 … を付ける。既定: 入力ファイル名"
+            ),
+        ),
+    ] = None,
+    model: ModelOption = _DEFAULT_MODEL_NAME,
+) -> None:
+    """wav ファイル(16bit PCM)を文字起こしする。"""
+    console = _make_console()
+    if not filename.is_file():
+        console.print(f"[red]エラー:[/red] 入力ファイルがありません: {filename}")
+        raise typer.Exit(1)
+    try:
+        source = WavFileSource(filename)
+    except (wave.Error, EOFError, ValueError, OSError) as exc:
+        console.print(f"[red]エラー:[/red] wav を読み込めません: {filename}: {exc}")
+        raise typer.Exit(1) from exc
+
+    try:
+        txt_path = _resolve_named_output(console, output_dir, output_name, TRANSCRIPT_SUFFIX)
+    except typer.Exit:
+        source.close()
+        raise
+    if txt_path is None:
+        txt_path = resolve_output_path(console, output_dir, filename.stem, TRANSCRIPT_SUFFIX)
+
+    code = run_file_transcription(
+        source,
+        console=console,
+        input_path=filename,
+        output_path=txt_path,
+        model_name=model.value,
     )
     raise typer.Exit(code)
 

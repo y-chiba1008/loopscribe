@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
 import wave
 from collections.abc import Callable
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,11 +16,12 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from loopscribe.audio.wasapi import OutputDeviceInfo
-from loopscribe.cli import app
+from loopscribe.audio.wavfile import WavFileSource
+from loopscribe.cli import app, run_file_transcription
 from loopscribe.errors import DeviceNotFoundError, ModelUnavailableError
 from loopscribe.models.kotoba import KotobaModel
 from loopscribe.models.small import SmallModel
-from loopscribe.transcriber import FakeTranscriber
+from loopscribe.transcriber import FakeTranscriber, Segment
 
 runner = CliRunner()
 
@@ -49,6 +52,7 @@ def test_help_lists_subcommands() -> None:
     assert result.exit_code == 0
     assert "start" in result.stdout
     assert "record" in result.stdout
+    assert "transcribe" in result.stdout
     assert "download-model" in result.stdout
     assert "devices" in result.stdout
 
@@ -229,8 +233,13 @@ class _EmptySource:
 class _FakeSpec:
     repo_id = "fake/model"
 
-    def __init__(self, on_ensure: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self,
+        on_ensure: Callable[[], None] | None = None,
+        transcriber: FakeTranscriber | None = None,
+    ) -> None:
         self._on_ensure = on_ensure
+        self._transcriber = transcriber or FakeTranscriber()
 
     def ensure(self) -> Path:
         if self._on_ensure is not None:
@@ -238,7 +247,7 @@ class _FakeSpec:
         return Path("/cache/fake")
 
     def load(self, model_path: Path) -> FakeTranscriber:
-        return FakeTranscriber()
+        return self._transcriber
 
 
 def _patch_start(monkeypatch: pytest.MonkeyPatch, spec: _FakeSpec) -> list[str | None]:
@@ -398,3 +407,162 @@ def test_record_capture_failure_exits_1(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert result.exit_code == 1
     assert "device lost" in result.stdout
     assert (tmp_path / "meeting.wav").is_file()
+
+
+def _write_wav(path: Path, *, seconds: float, sample_rate: int = 16_000, channels: int = 1) -> None:
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(b"\x00\x00" * int(seconds * sample_rate) * channels)
+
+
+def _patch_transcribe(monkeypatch: pytest.MonkeyPatch, spec: _FakeSpec | None = None) -> list[str]:
+    """Windows 以外として、モデルを偽物にする。読み込んだモデル名を返す。"""
+    monkeypatch.setattr(sys, "platform", "linux")
+    loaded: list[str] = []
+    fake_spec = spec or _FakeSpec()
+
+    def _get_model(name: str) -> _FakeSpec:
+        loaded.append(name)
+        return fake_spec
+
+    monkeypatch.setattr("loopscribe.cli.get_model", _get_model)
+    return loaded
+
+
+def test_transcribe_help_shows_options() -> None:
+    result = runner.invoke(app, ["transcribe", "--help"])
+    assert result.exit_code == 0
+    assert "FILENAME" in result.stdout
+    assert "--output-dir" in result.stdout
+    assert "--output-name" in result.stdout
+    assert "--model" in result.stdout
+    assert "--device" not in result.stdout
+
+
+def test_transcribe_writes_txt_named_after_input(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wav = tmp_path / "meeting.wav"
+    _write_wav(wav, seconds=2.0, sample_rate=48_000, channels=2)
+    out_dir = tmp_path / "out"
+    fake = FakeTranscriber([[Segment(start=0.5, end=1.0, text="こんにちは")]])
+    spec = _FakeSpec(transcriber=fake)
+    loaded = _patch_transcribe(monkeypatch, spec)
+
+    result = runner.invoke(app, ["transcribe", str(wav), "-o", str(out_dir)])
+    assert result.exit_code == 0
+    assert loaded == ["small"]
+    assert [p.name for p in out_dir.iterdir()] == ["meeting.txt"]
+    lines = (out_dir / "meeting.txt").read_text(encoding="utf-8").splitlines()
+    assert re.fullmatch(
+        r"# loopscribe 入力: meeting\.wav / 処理開始: [\d-]+ [\d:]+ / モデル: fake/model", lines[0]
+    )
+    assert lines[1:] == ["[00:00:00] こんにちは"]
+    assert "[00:00:00] こんにちは" in result.stdout
+    assert "警告" not in result.stdout
+
+
+def test_transcribe_output_name_and_model(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    wav = tmp_path / "meeting.wav"
+    _write_wav(wav, seconds=1.0)
+    (tmp_path / "notes.txt").write_text("既存", encoding="utf-8")
+    loaded = _patch_transcribe(monkeypatch)
+
+    result = runner.invoke(
+        app, ["transcribe", str(wav), "-o", str(tmp_path), "-n", "notes.txt", "--model", "kotoba"]
+    )
+    assert result.exit_code == 0
+    assert loaded == ["kotoba"]
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "既存"
+    assert (tmp_path / "notes_2.txt").is_file()
+    out = result.stdout
+    assert out.count("警告") == 1
+    assert out.index("notes_2.txt に保存します") < out.index("モデルの読み込みが完了しました")
+
+
+def test_transcribe_missing_file_exits_1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    loaded = _patch_transcribe(monkeypatch)
+    result = runner.invoke(app, ["transcribe", str(tmp_path / "none.wav"), "-o", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "入力ファイルがありません" in result.stdout
+    assert loaded == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("content", [b"", b"not a wav file"])
+def test_transcribe_invalid_wav_exits_1(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: bytes
+) -> None:
+    wav = tmp_path / "broken.wav"
+    wav.write_bytes(content)
+    loaded = _patch_transcribe(monkeypatch)
+    result = runner.invoke(app, ["transcribe", str(wav), "-o", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "wav を読み込めません" in result.stdout
+    assert loaded == []
+    assert [p.name for p in tmp_path.iterdir()] == ["broken.wav"]
+
+
+def test_transcribe_rejects_non_pcm16_wav(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    wav = tmp_path / "u8.wav"
+    with wave.open(str(wav), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(1)
+        wf.setframerate(8000)
+        wf.writeframes(b"\x80" * 800)
+    _patch_transcribe(monkeypatch)
+    result = runner.invoke(app, ["transcribe", str(wav), "-o", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "16bit" in result.stdout
+
+
+def test_transcribe_rejects_path_in_output_name_before_loading_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wav = tmp_path / "meeting.wav"
+    _write_wav(wav, seconds=1.0)
+    loaded = _patch_transcribe(monkeypatch)
+    result = runner.invoke(app, ["transcribe", str(wav), "-o", str(tmp_path), "-n", "a/b"])
+    assert result.exit_code == 1
+    assert "エラー" in result.stdout
+    assert loaded == []
+
+
+def test_transcribe_model_unavailable_exits_1(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wav = tmp_path / "meeting.wav"
+    _write_wav(wav, seconds=1.0)
+
+    def _raise() -> None:
+        raise ModelUnavailableError("モデル 'small' の取得に失敗しました: network down")
+
+    _patch_transcribe(monkeypatch, _FakeSpec(on_ensure=_raise))
+    result = runner.invoke(app, ["transcribe", str(wav), "-o", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "network down" in result.stdout
+    assert not (tmp_path / "meeting.txt").exists()
+
+
+def test_run_file_transcription_stopped_returns_130(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wav = tmp_path / "meeting.wav"
+    _write_wav(wav, seconds=5.0)
+    _patch_transcribe(monkeypatch)
+    stop = threading.Event()
+    stop.set()
+    console = Console(file=StringIO(), force_terminal=False, width=120, highlight=False)
+
+    code = run_file_transcription(
+        WavFileSource(wav),
+        console=console,
+        input_path=wav,
+        output_path=tmp_path / "meeting.txt",
+        stop_event=stop,
+    )
+    assert code == 130
+    assert "中断しました" in console.file.getvalue()
+    assert (tmp_path / "meeting.txt").read_text(encoding="utf-8").startswith("# loopscribe 入力:")

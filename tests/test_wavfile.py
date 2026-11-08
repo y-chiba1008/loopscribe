@@ -59,6 +59,17 @@ def test_wavfile_source_close_during_iteration_stops_cleanly(tmp_path: Path) -> 
     assert list(it) == []
 
 
+def test_wavfile_source_duration_from_header(tmp_path: Path) -> None:
+    path = tmp_path / "stereo.wav"
+    rate = 48_000
+    stereo = np.zeros(rate * 3 * 2, dtype=np.float32)
+    _write_pcm16_wav(path, stereo, sample_rate=rate, channels=2)
+
+    source = WavFileSource(path)
+    assert source.duration_seconds == pytest.approx(3.0)
+    source.close()
+
+
 def test_wavfile_source_rejects_non_pcm16(tmp_path: Path) -> None:
     path = tmp_path / "bad.wav"
     with wave.open(str(path), "wb") as wf:

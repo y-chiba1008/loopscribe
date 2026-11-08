@@ -49,6 +49,17 @@ def test_progress_reporter_enabled_flag() -> None:
         reporter.update(90.0, 120.0)
 
 
+def test_progress_reporter_fixed_total_shows_audio_length() -> None:
+    stream = StringIO()
+    console = Console(file=stream, force_terminal=True, width=120, highlight=False)
+    with ProgressReporter(console, enabled=True, total_seconds=600.0) as reporter:
+        reporter.update(300.0, 30.0)
+    out = stream.getvalue()
+    assert "処理済み 00:05:00 / 音声 00:10:00" in out
+    assert "50%" in out
+    assert "遅れ" not in out
+
+
 def test_format_size() -> None:
     assert format_size(0) == "0.0MB"
     assert format_size(44) == "0.0MB"

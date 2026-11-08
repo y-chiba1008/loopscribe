@@ -23,6 +23,9 @@ LAG_WARN_SECONDS = 600.0
 BUFFER_WARN_MB = 2048.0
 UI_REFRESH_SECONDS = 0.5
 SIGNAL_POLL_SECONDS = 0.2
+# transcribe: ファイルの先読みの上限(未処理の音声がこの秒数を超えたら読み込みを待たせる)。
+# CHUNK_SECONDS 以上にすること
+FILE_READ_AHEAD_SECONDS = 2 * CHUNK_SECONDS
 # record: この秒数ぶん溜まるごとに wav へ書いて flush する
 RECORD_FLUSH_SECONDS = 1.0
 
