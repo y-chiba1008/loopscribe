@@ -107,6 +107,15 @@ tests/
 未確定事項・検証待ちの項目・既知の不具合は、GitHubのissueで管理します(`gh issue list`)。
 決まった内容は、設計資料の決定ログに追記してください。
 
+## プルリクエスト
+
+- Test plan にWindowsでの操作(実機での確認)が含まれる場合は、そのブランチを指定してインストールするコマンドをPRに載せる。
+ ブランチ名の `#` はURLのフラグメントと解釈されるので `%23` にエンコードする。
+
+ ```powershell
+ uv tool install --force "git+https://github.com/y-chiba1008/loopscribe.git@feature/%2334_add_output_name_option"
+ ```
+
 ## その他
 技術的な知見は /home/chiba/workspaces/knowledge-base を参照すること。
 まず INDEX.md を読み、rg でキーワード検索する。詳細は同ディレクトリの AGENTS.md に従う。
