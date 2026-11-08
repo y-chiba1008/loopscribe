@@ -9,6 +9,7 @@ import signal
 import sys
 import threading
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -16,13 +17,12 @@ import typer
 from rich.console import Console
 
 from loopscribe.audio.source import AudioSource
-from loopscribe.constants import MODEL_NAME, OUTPUT_FILENAME_FORMAT
+from loopscribe.constants import OUTPUT_FILENAME_FORMAT
 from loopscribe.errors import FatalStartupError, ModelUnavailableError
-from loopscribe.model import download_model, ensure_model
+from loopscribe.models import DEFAULT_MODEL, MODELS, get_model
 from loopscribe.output import ConsoleSink, MultiSink, TxtSink
 from loopscribe.pipeline import PipelineProgress, TranscriptionPipeline
 from loopscribe.progress import ProgressReporter, model_loading_status
-from loopscribe.transcriber import FasterWhisperTranscriber
 
 app = typer.Typer(
     name="loopscribe",
@@ -30,6 +30,18 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+# `--model` の選択肢。typer は Enum から選択肢とヘルプを作る
+ModelName = StrEnum("ModelName", {name: name for name in MODELS})
+_DEFAULT_MODEL_NAME = ModelName(DEFAULT_MODEL)
+
+ModelOption = Annotated[
+    ModelName,
+    typer.Option(
+        "--model",
+        help="文字起こしのモデル。kotoba は small より高精度だが、遅くRAMも多く使う",
+    ),
+]
 
 
 def _version_callback(value: bool) -> None:
@@ -83,20 +95,21 @@ def run_transcription(
     *,
     console: Console,
     output_dir: Path,
-    model_name: str = MODEL_NAME,
+    model_name: str = DEFAULT_MODEL,
     stop_event: threading.Event | None = None,
 ) -> int:
     """AudioSource から文字起こしを実行する(CLI と開発用スクリプトの共通経路)。"""
     stop = stop_event if stop_event is not None else threading.Event()
 
     try:
-        model_path = ensure_model(model_name)
-    except ModelUnavailableError as exc:
+        spec = get_model(model_name)
+        model_path = spec.ensure()
+    except (ValueError, ModelUnavailableError) as exc:
         console.print(f"[red]エラー:[/red] {exc}")
         return 1
 
-    with model_loading_status(console, model_name=model_name):
-        transcriber = FasterWhisperTranscriber(str(model_path))
+    with model_loading_status(console, model_name=spec.repo_id):
+        transcriber = spec.load(model_path)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     started_at = datetime.now()
@@ -122,7 +135,7 @@ def run_transcription(
     previous = signal.signal(signal.SIGINT, _on_sigint)
     try:
         console_sink = ConsoleSink(console)
-        txt_sink = TxtSink(txt_path, started_at=started_at, model_name=model_name)
+        txt_sink = TxtSink(txt_path, started_at=started_at, model_name=spec.repo_id)
         sink = MultiSink([console_sink, txt_sink])
         sink_holder["sink"] = sink
 
@@ -146,12 +159,13 @@ def run_transcription(
 
 
 @app.command("download-model")
-def download_model_cmd() -> None:
-    """定数のモデルを事前に取得する。"""
+def download_model_cmd(model: ModelOption = _DEFAULT_MODEL_NAME) -> None:
+    """モデルを事前に取得する。"""
     console = _make_console()
-    console.print(f"モデルを取得します: {MODEL_NAME}")
+    spec = get_model(model.value)
+    console.print(f"モデルを取得します: {spec.repo_id}")
     try:
-        path = download_model(MODEL_NAME)
+        path = spec.download()
     except ModelUnavailableError as exc:
         console.print(f"[red]エラー:[/red] {exc}")
         raise typer.Exit(1) from exc
@@ -193,6 +207,7 @@ def start_cmd(
             resolve_path=False,
         ),
     ] = Path("."),
+    model: ModelOption = _DEFAULT_MODEL_NAME,
 ) -> None:
     """システム音声の取得と文字起こしを開始する。"""
     console = _make_console()
@@ -210,5 +225,5 @@ def start_cmd(
         console.print("`loopscribe devices` で一覧を確認してください。")
         raise typer.Exit(1) from exc
 
-    code = run_transcription(source, console=console, output_dir=output_dir)
+    code = run_transcription(source, console=console, output_dir=output_dir, model_name=model.value)
     raise typer.Exit(code)

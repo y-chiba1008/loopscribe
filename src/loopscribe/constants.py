@@ -1,12 +1,13 @@
-"""設定値の定数。CLIオプションにはせず、ここに集約する。"""
+"""モデルに依存しない設定値の定数。CLIオプションにはせず、ここに集約する。
 
-MODEL_NAME = "small"
-COMPUTE_TYPE = "int8"
-CPU_THREADS = 4
+推論パラメータはモデルごとに `loopscribe.models` の各ファイルで定義する。
+"""
+
+import os
+
+# 物理コア数の目安(論理コア数の半分)。論理コア数ぶん使うより速い
+CPU_THREADS = max(1, (os.cpu_count() or 2) // 2)
 LANGUAGE = "ja"
-BEAM_SIZE = 1
-VAD_FILTER = True
-CONDITION_ON_PREVIOUS_TEXT = False
 
 SAMPLE_RATE = 16_000
 CHUNK_SECONDS = 30.0

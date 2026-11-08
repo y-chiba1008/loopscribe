@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +12,9 @@ from typer.testing import CliRunner
 
 from loopscribe.audio.wasapi import OutputDeviceInfo
 from loopscribe.cli import app
-from loopscribe.errors import DeviceNotFoundError
+from loopscribe.errors import DeviceNotFoundError, ModelUnavailableError
+from loopscribe.models.kotoba import KotobaModel
+from loopscribe.models.small import SmallModel
 
 runner = CliRunner()
 
@@ -64,11 +67,50 @@ def test_start_help_shows_options() -> None:
     assert result.exit_code == 0
     assert "--device" in result.stdout
     assert "--output-dir" in result.stdout
+    assert "--model" in result.stdout
 
 
 def test_download_model_help() -> None:
     result = runner.invoke(app, ["download-model", "--help"])
     assert result.exit_code == 0
+    assert "--model" in result.stdout
+
+
+def test_download_model_defaults_to_small(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(
+        SmallModel, "download", lambda self: called.append(self.name) or Path("/cache/small")
+    )
+    result = runner.invoke(app, ["download-model"])
+    assert result.exit_code == 0
+    assert called == ["small"]
+    assert "取得完了" in result.stdout
+
+
+def test_download_model_kotoba(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(
+        KotobaModel, "download", lambda self: called.append(self.name) or Path("/cache/kotoba")
+    )
+    result = runner.invoke(app, ["download-model", "--model", "kotoba"])
+    assert result.exit_code == 0
+    assert called == ["kotoba"]
+    assert "kotoba-tech/kotoba-whisper-v2.0-faster" in result.stdout
+
+
+def test_download_model_failure_exits_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(self: SmallModel) -> Path:
+        raise ModelUnavailableError("モデル 'small' の取得に失敗しました: network down")
+
+    monkeypatch.setattr(SmallModel, "download", _raise)
+    result = runner.invoke(app, ["download-model"])
+    assert result.exit_code == 1
+    assert "エラー" in result.stdout
+
+
+def test_download_model_rejects_unknown_model() -> None:
+    result = runner.invoke(app, ["download-model", "--model", "large"])
+    assert result.exit_code == 2
 
 
 def test_devices_lists_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -124,11 +166,23 @@ def test_start_opens_loopback_source(monkeypatch: pytest.MonkeyPatch) -> None:
         open_loopback_source=lambda device: opened.append(device) or FakeSource(),
     )
     monkeypatch.setattr("loopscribe.cli._load_wasapi", lambda: fake_wasapi)
+    models: list[str] = []
     monkeypatch.setattr(
         "loopscribe.cli.run_transcription",
-        lambda source, console, output_dir: 0,
+        lambda source, console, output_dir, model_name: models.append(model_name) or 0,
     )
 
     result = runner.invoke(app, ["start", "--device", "Speakers"])
     assert result.exit_code == 0
     assert opened == ["Speakers"]
+    assert models == ["small"]
+
+    result = runner.invoke(app, ["start", "--model", "kotoba"])
+    assert result.exit_code == 0
+    assert models == ["small", "kotoba"]
+
+
+def test_start_rejects_unknown_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    result = runner.invoke(app, ["start", "--model", "large"])
+    assert result.exit_code == 2

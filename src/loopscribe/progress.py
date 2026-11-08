@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
 from rich.status import Status
 
-from loopscribe.constants import MODEL_NAME, UI_REFRESH_SECONDS
+from loopscribe.constants import UI_REFRESH_SECONDS
 from loopscribe.output import format_timestamp
 
 
@@ -103,7 +103,7 @@ class ProgressReporter:
 def model_loading_status(
     console: Console,
     *,
-    model_name: str = MODEL_NAME,
+    model_name: str,
 ) -> Iterator[None]:
     """モデル読み込み中の表示。TTY ならスピナー、非TTY なら1行メッセージ。"""
     message = f"モデルを読み込み中: {model_name}"

@@ -7,25 +7,23 @@
 ## プロジェクト概要
 
 `loopscribe`: Windowsのシステム音声(WASAPIループバック)を、ローカルで日本語に文字起こしするCLI。
-faster-whisper(CPU / int8)+ Whisper `small`。GPUなし・従量課金なし。
+faster-whisper(CPU / int8)+ Whisper `small`(`--model kotoba` で kotoba-whisper に切り替え可)。GPUなし・従量課金なし。
 `uv tool install` で配布するPythonパッケージ。
 
 ## 守るべき決定事項(変更する場合は、ユーザーに確認すること)
 
 1. **実行環境はWindowsのみ**。音声取得は WASAPIループバック(`pyaudiowpatch`)。開発はWSL2で行う。
 2. **Python 3.13以降**。
-3. **CLIオプションは最小限**: `start` の `--device` と `-o/--output-dir` だけ。
-   モデル名・チャンク長などの設定値は、すべて `src/loopscribe/constants.py` の定数で定義する(オプションを増やさない)。
-4. **サブコマンドは3つだけ**: `start` / `download-model` / `devices`。
-5. **文字起こしの遅れは無制限に許容する。未処理の音声は破棄しない**(メモリに保持する)。
+3. **サブコマンドは3つだけ**: `start` / `download-model` / `devices`。
+4. **文字起こしの遅れは無制限に許容する。未処理の音声は破棄しない**(メモリに保持する)。
    バッファ上限による破棄や、欠落マーカーの出力は、初期版では実装しない。
-6. **警告のみの方針**: 実行中に続行可能な問題は警告を出して継続する。
+5. **警告のみの方針**: 実行中に続行可能な問題は警告を出して継続する。
    ただし起動時の致命的な状況(デバイス未検出、モデル取得不可)は、エラーメッセージを出して終了コード1で終了する。
    実行中にデバイスの切断などで取得ストリームが失敗した場合は、警告を出して録音を停止し、
    バックログを処理してから終了コード1で終了する(確定済み)。
-7. **進捗表示**: `処理済み時間 / 録音時間` をrichのプログレスバーでリアルタイム表示する。
-8. **完全ローカル処理**。ネットワーク通信はモデルのダウンロード時のみ。
-9. 初期版の対象は**システム音声のみ**(マイク入力は将来対応)。
+6. **進捗表示**: `処理済み時間 / 録音時間` をrichのプログレスバーでリアルタイム表示する。
+7. **完全ローカル処理**。ネットワーク通信はモデルのダウンロード時のみ。
+8. 初期版の対象は**システム音声のみ**(マイク入力は将来対応)。
 
 ## コマンド
 
@@ -43,9 +41,14 @@ uv run scripts/bench_models.py scripts/data/sample.wav --reference scripts/data/
 ```
 src/loopscribe/
 ├── cli.py            # Typerアプリ。start / download-model / devices
-├── constants.py      # すべての設定値(CLIオプション化しない)
+├── constants.py      # モデルに依存しない設定値(CLIオプション化しない)
 ├── errors.py         # 起動時の致命的エラーなどの例外
-├── model.py          # モデルの取得(download_model、未取得判定)
+├── model.py          # モデルの取得(download_model、未取得判定。repo id を受け取る汎用の処理)
+├── models/
+│   ├── __init__.py   # モデルの登録(MODELS、DEFAULT_MODEL)
+│   ├── base.py       # ModelSpec(モデルごとの取得・修正・読み込みの共通インターフェース)
+│   ├── small.py      # small の推論パラメータと推論(WhisperModel.transcribe)
+│   └── kotoba.py     # kotoba-whisper の推論パラメータと推論(BatchedInferencePipeline)、設定の修正
 ├── audio/
 │   ├── source.py     # AudioSource プロトコル
 │   ├── wasapi.py     # WasapiLoopbackSource(Windows専用。importは遅延させる)
@@ -53,7 +56,7 @@ src/loopscribe/
 │   └── convert.py    # モノラル化 + 16kHzへのリサンプル(soxr.ResampleStream)
 ├── buffer.py         # AudioBuffer(int16 / 16kHz / モノラル。スレッドセーフ)
 ├── chunker.py        # チャンク区間と担当境界の計算
-├── transcriber.py    # Transcriber プロトコル + faster-whisper実装
+├── transcriber.py    # Transcriber プロトコル、Segment / Word、faster-whisperの結果の変換
 ├── pipeline.py       # スレッド構成、チャンク処理、セグメントの担当割当て
 ├── output.py         # コンソール出力とtxt出力(Sink)
 └── progress.py       # プログレスバー(rich)
@@ -67,6 +70,10 @@ tests/
 
 - **音声取得とコアを分離する**。`AudioSource` の後ろにWindows固有の処理を閉じ込め、それ以外はOS非依存にする。
   `pyaudiowpatch` のimportは `wasapi.py` の中だけで行い、モジュールのimportも遅延させる(WSLで `uv sync` / テストが通るように)。
+- **CLIオプションは必要なものだけにする**: `start` の `--device` / `-o/--output-dir` / `--model` と、
+  `download-model` の `--model`。チャンク長などの設定値は `constants.py`(モデルに依存しない値)で定義する。
+- **推論パラメータはモデルごとに固定値で持つ**(`models/<モデル>.py`)。ユーザーが調整しきれないので、CLIオプションにしない。
+  モデルを追加するときは `ModelSpec` を実装し、`models/__init__.py` の `MODELS` に登録する。
 - **設定値は引数で受け取り、既定値として定数を使う**。関数やクラスが `constants` をグローバルに直接参照すると、
   テストでチャンク長を変えられない。
 - 表示は **richの単一のConsole** に統一する(ログ・警告・本文・プログレスバーを同じConsole経由にして、表示を崩さない)。
@@ -89,7 +96,7 @@ tests/
 
 ## やらないこと
 
-- 上記の「守るべき決定事項」に反する変更(オプションの追加、バックログの破棄など)を、確認なしに入れること
+- 上記の「守るべき決定事項」に反する変更(バックログの破棄など)を、確認なしに入れること
 - 実在する個人の音声や、権利のある音声をリポジトリに含めること
 - 設計資料に書かれていない大きな依存の追加(必要なら理由を添えてユーザーに確認する)
 

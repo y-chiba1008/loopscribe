@@ -6,6 +6,7 @@ CLI オプションにはしない。WSL での手動確認用。
 使い方:
   uv run scripts/run_wav.py path/to/audio.wav
   uv run scripts/run_wav.py path/to/audio.wav -o /tmp/out
+  uv run scripts/run_wav.py path/to/audio.wav --model kotoba
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from rich.console import Console
 
 from loopscribe.audio.wavfile import WavFileSource
 from loopscribe.cli import run_transcription
+from loopscribe.models import DEFAULT_MODEL, MODELS
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -29,6 +31,12 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=Path.cwd(),
         help="txt の出力先ディレクトリ(既定: カレント)",
+    )
+    parser.add_argument(
+        "--model",
+        choices=list(MODELS),
+        default=DEFAULT_MODEL,
+        help=f"文字起こしのモデル(既定: {DEFAULT_MODEL})",
     )
     args = parser.parse_args(argv)
 
@@ -43,7 +51,9 @@ def main(argv: list[str] | None = None) -> int:
 
     source = WavFileSource(wav_path)
     console.print(f"入力: {wav_path}")
-    return run_transcription(source, console=console, output_dir=args.output_dir)
+    return run_transcription(
+        source, console=console, output_dir=args.output_dir, model_name=args.model
+    )
 
 
 if __name__ == "__main__":

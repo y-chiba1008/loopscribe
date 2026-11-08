@@ -1,4 +1,7 @@
-"""Whisper モデルの取得と未取得判定。"""
+"""Whisper モデルの取得と未取得判定(モデルの種類に依存しない)。
+
+model_name には faster-whisper のサイズ名(`small` など)か、Hugging Face の repo id を渡す。
+"""
 
 from __future__ import annotations
 
@@ -7,12 +10,11 @@ from pathlib import Path
 from faster_whisper.utils import download_model as _fw_download_model
 from huggingface_hub.errors import LocalEntryNotFoundError
 
-from loopscribe.constants import MODEL_NAME
 from loopscribe.errors import ModelUnavailableError
 
 
 def is_model_available(
-    model_name: str = MODEL_NAME,
+    model_name: str,
     *,
     cache_dir: str | Path | None = None,
 ) -> bool:
@@ -32,7 +34,7 @@ def is_model_available(
 
 
 def download_model(
-    model_name: str = MODEL_NAME,
+    model_name: str,
     *,
     cache_dir: str | Path | None = None,
 ) -> Path:
@@ -49,7 +51,7 @@ def download_model(
 
 
 def ensure_model(
-    model_name: str = MODEL_NAME,
+    model_name: str,
     *,
     cache_dir: str | Path | None = None,
 ) -> Path:

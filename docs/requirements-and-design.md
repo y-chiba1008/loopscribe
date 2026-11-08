@@ -23,7 +23,7 @@ PCで再生されている音声(システム音声)を、**ローカル(GPUな�
 | 言語 | 日本語 |
 | コスト | 従量課金なし。完全ローカル処理(通信はモデルのダウンロード時のみ) |
 | 配布 | GitHubから `uv tool install git+https://...`(自分用。PyPI公開は未定) |
-| モデル | Whisper `small`(faster-whisper形式)。モデル検証で確定(決定ログ#17) |
+| モデル | Whisper `small`(faster-whisper形式)。モデル検証で確定(決定ログ#17)。`--model kotoba` で kotoba-whisper に切り替えられる(決定ログ#20) |
 | コマンド名 | `loopscribe`(変更する場合は `pyproject.toml` の `name` と `[project.scripts]`、パッケージ名を変える) |
 
 ## 3. スコープ
@@ -38,7 +38,7 @@ PCで再生されている音声(システム音声)を、**ローカル(GPUな�
 **初期版に含まない(将来拡張。§12)**
 
 - マイク入力、音声ファイルの文字起こし
-- SRT / JSONL などの出力形式、設定ファイル、CLIオプションの追加
+- SRT / JSONL などの出力形式、設定ファイル、推論パラメータのCLIオプション化
 - バックログの破棄と欠落マーカー
 - Windows以外のOS
 
@@ -54,11 +54,12 @@ PCで再生されている音声(システム音声)を、**ローカル(GPUな�
 | FR-04 | txtの保存先は `-o/--output-dir`(**既定: カレントディレクトリ**)。ファイル名は `loopscribe_YYYYMMDD_HHMMSS.txt` |
 | FR-05 | `--device` で対象の出力デバイスを指定できる(番号、または名前の一部)。既定は既定の出力デバイス |
 | FR-06 | `devices` サブコマンドで、対象にできる出力デバイスを一覧表示する |
-| FR-07 | `download-model` サブコマンドでモデルを事前取得できる。`start` 時に未取得なら自動で取得する |
+| FR-07 | `download-model` サブコマンドでモデルを事前取得できる(`--model` で対象を選ぶ)。`start` 時に未取得なら自動で取得する |
 | FR-08 | Ctrl+C 1回目で録音を停止し、未処理の音声を処理してから終了する。2回目で即時中断する |
 | FR-09 | **文字起こしの遅れは無制限に許容する。未処理の音声は破棄しない**(メモリに保持する)。破棄マーカーは出さない |
 | FR-10 | `処理済み時間 / 録音時間` をプログレスバーでリアルタイムに表示する |
-| FR-11 | 設定値(モデル名、チャンク長など)は定数ファイル(`constants.py`)で定義する。CLIオプションにしない |
+| FR-11 | モデルに依存しない設定値(チャンク長など)は定数ファイル(`constants.py`)で定義する。CLIオプションにしない |
+| FR-12 | `--model` で文字起こしのモデルを選べる(`small` / `kotoba`。既定は `small`)。推論パラメータはモデルごとに固定値を持ち、CLIオプションにしない(§6.8) |
 
 ### 非機能要件
 
@@ -72,8 +73,8 @@ PCで再生されている音声(システム音声)を、**ローカル(GPUな�
 ## 5. CLI仕様
 
 ```
-loopscribe start [--device DEVICE] [-o, --output-dir DIR]
-loopscribe download-model
+loopscribe start [--device DEVICE] [-o, --output-dir DIR] [--model {small,kotoba}]
+loopscribe download-model [--model {small,kotoba}]
 loopscribe devices
 loopscribe --version
 ```
@@ -81,7 +82,7 @@ loopscribe --version
 | コマンド | 内容 |
 |---|---|
 | `start` | 取得と文字起こしを開始する。モデル未取得なら先に自動取得する |
-| `download-model` | `constants.MODEL_NAME` を取得する(`faster_whisper.utils.download_model` を使用) |
+| `download-model` | `--model` のモデル(既定: `small`)を取得する(`faster_whisper.utils.download_model` を使用)。取得後に、モデルごとの設定の修正(§6.8)を行う |
 | `devices` | WASAPIの出力デバイス(とループバック)の番号・名前・サンプルレート・チャンネル数を表示し、既定のデバイスを示す |
 
 **終了コード**: 0=正常終了、1=エラー(起動時の致命的な状況など)、130=2回目のCtrl+Cによる中断。
@@ -138,7 +139,9 @@ Windowsでは `Event.wait()` をタイムアウトなしで呼ぶとシグナル
 - `AudioSource`(Protocol): `sample_rate`、`channels`、ブロックを順に返すイテレータ、`close()`。
 - `Transcriber`(Protocol): `transcribe(samples_float32_16k) -> list[Segment]`。`Segment` は `start`/`end`(チャンク内の秒)と `text`、
   語の列 `words`(`Word` の `start`/`end`(チャンク内の秒)と `text`。担当割当て(§6.6)に使う)。
-  faster-whisper実装と、テスト用の偽実装を用意する。
+  実装はモデルごとに用意する(§6.8)。テスト用の偽実装も用意する。
+- `ModelSpec`(抽象クラス): モデルごとの取得(`ensure` / `download`)、取得後の設定の修正(`fix_files`)、
+  `Transcriber` の生成(`load`)。`models.MODELS` に名前で登録する。
 - `AudioBuffer`: int16 / 16kHz / モノラルのサンプルを保持する。`append`、`total_samples`、`read(start, end)`、
   `trim_before(sample)`、`wait_for(n_samples, timeout)`、`close()`。スレッドセーフにする。
 - `Sink`(Protocol): `write(segment_abs)`、`close()`。コンソール出力とtxt出力を実装する。
@@ -165,9 +168,8 @@ Windowsでは `Event.wait()` をタイムアウトなしで呼ぶとシグナル
   `MIN_TAIL_SECONDS`(1秒)以上あれば、端数のチャンクとして処理する。
 - Whisperのエンコーダは**常に30秒の窓**で処理するため、チャンクを30秒未満にしても1回あたりの計算量は減らない。
   30秒が、CPUでの効率が最も良い。
-- 推論の呼び出し条件(定数): `language="ja"`、`beam_size=BEAM_SIZE`、`vad_filter=True`、`condition_on_previous_text=False`。
-  入力はfloat32 / 16kHz / モノラルのnumpy配列。
-- `word_timestamps=True` は常に渡す(担当割当て(§6.6)に必須なので、定数で切り替えない)。
+- 推論の呼び出し条件は、モデルごとの固定値(§6.8)。入力はfloat32 / 16kHz / モノラルのnumpy配列。
+- `word_timestamps=True` は、どのモデルでも常に渡す(担当割当て(§6.6)に必須なので、切り替えない)。
 
 ### 6.6 セグメントの担当割当て(重複除去)
 
@@ -204,17 +206,45 @@ Windowsでは `Event.wait()` をタイムアウトなしで呼ぶとシグナル
   モデルの読み込みが終わってから録音を始め、録音の開始をメッセージで知らせる(録音の開始時刻を、ユーザーが分かるようにする)。
   標準出力がTTYでない場合は、スピナーの代わりに1行のメッセージだけを出す。
 
+### 6.8 モデルごとの推論(決定ログ#20)
+
+モデルごとに `ModelSpec` を実装し、推論パラメータは各モデルのファイル(`models/<モデル>.py`)に固定値で置く。
+チャンク処理(§6.5)と担当割当て(§6.6)は、どのモデルでも共通。違うのは、30秒チャンクの中の推論方法だけ。
+
+| `--model` | 取得元 | 推論方法 | 固定のパラメータ |
+|---|---|---|---|
+| `small`(既定) | `small`(Systran/faster-whisper-small) | `WhisperModel.transcribe` で30秒チャンクをそのまま推論する | int8、`beam_size=1`、`vad_filter=True`、`condition_on_previous_text=False` |
+| `kotoba` | `kotoba-tech/kotoba-whisper-v2.0-faster` | `BatchedInferencePipeline.transcribe` で、チャンク内をVADで無音の位置で区切り、15秒以下のクリップごとに推論する | int8、`beam_size=1`、`chunk_length=15`、`batch_size=1`、`without_timestamps=False`(時刻トークンあり) |
+
+- kotoba-whisper は、固定長のウィンドウで発話の途中を切ると、その発話を飛ばしやすい。VADで区切ると発話の途中で切らないので、
+  JSUTの検証で CER が small より約15〜25%低くなった(Issue #29)。`small` にこの方式を使うと大きく悪化するので、方式はモデルごとに分ける。
+- **速度**: kotoba-whisper は開発機(Ryzen 5 3600、WSL2)で RTF 0.76〜1.00、対象PC(i5-8350U)では RTF 1.6〜2.2 以上で、遅れが累積する。
+  対象PCでは `small` を使う。kotoba-whisper はRAMも多く使う(モデル約1.5GB)。
+
+**kotoba-whisper の設定の修正(`alignment_heads`)**
+
+- 語ごとの時刻(`word_timestamps=True`)は、ctranslate2 の `align()` で求める。デコーダーの特定の層とヘッドの cross-attention から、
+  各トークンが音声のどの位置に当たるかを求める。使う層とヘッドの組は、モデルのフォルダの `config.json` の `alignment_heads` に書かれている。
+- `kotoba-whisper-v2.0-faster` の `config.json` には、large-v3 の値(デコーダーの7〜25層)がそのまま入っている。
+  kotoba-whisper のデコーダーは2層しかないので、存在しない層を参照してネイティブコードが異常終了する(終了コード139。Pythonの例外にならない)。
+- `alignment_heads` を `[[1, h] for h in range(20)]`(最後の層の全ヘッド)に書き換える。
+  ctranslate2 の変換ツールが、`alignment_heads` が無いときに使う既定値(デコーダーの後半の層の全ヘッド)と同じ。
+- ctranslate2 は、モデルのフォルダの `config.json` を読む。外から値を渡すAPIは無い。メモリからファイルを渡す方法(`files=`)は、
+  `model.bin`(約1.5GB)をメモリに読むのでRAMの使用量が倍になる。そのため、**Hugging Face のキャッシュの `config.json` をその場で置き換える**。
+  - `snapshots/<リビジョン>/config.json` は、実体(`blobs/`)へのシンボリックリンク(Windowsでは通常のファイルのこともある)。
+    修正した内容を一時ファイルに書き、`os.replace` でリンクごと置き換える。`blobs/` の実体には触らない。
+  - huggingface_hub は、ファイルがあれば取り直さないので、修正は残る。
+  - 確認と修正は、`download-model` の後と、`start` の起動時に毎回行う。値が違うときだけ書き換える
+    (新しいリビジョンを取り直した場合や、別のツールで取得した場合にも直る)。
+
 ## 7. 定数(`constants.py`)
+
+モデルに依存しない値だけを置く。推論パラメータは §6.8 のとおり、モデルごとのファイルに置く。
 
 | 定数 | 暫定値 | 備考 |
 |---|---|---|
-| `MODEL_NAME` | `small` | 検証で確定(決定ログ#17) |
-| `COMPUTE_TYPE` | `"int8"` | CPU向け量子化 |
-| `CPU_THREADS` | 4 | 物理コア数。検証で確定(8スレッドより速い) |
+| `CPU_THREADS` | `max(1, (os.cpu_count() or 2) // 2)` | 物理コア数の目安(論理コア数の半分)。対象PCで4、開発機で6。物理コア数のほうが論理コア数より速い(決定ログ#17、#20) |
 | `LANGUAGE` | `"ja"` | |
-| `BEAM_SIZE` | 1 | 検証で確定。5にしてもCERの改善が小さい |
-| `VAD_FILTER` | `True` | 検証で確定。オフにすると取りこぼしが増える |
-| `CONDITION_ON_PREVIOUS_TEXT` | `False` | チャンクをまたいだ誤りの伝播を防ぐ |
 | `SAMPLE_RATE` | 16000 | |
 | `CHUNK_SECONDS` / `OVERLAP_SECONDS` | 30 / 3 | |
 | `MIN_TAIL_SECONDS` | 1.0 | 停止時の端数チャンクを処理する最小の長さ |
@@ -245,7 +275,7 @@ CPU(i5-8350U / int8)で、kotoba-whisperが実用的な速度で動くかを確�
 2. 段階1: `uv run scripts/bench_models.py scripts/data/sample.wav --reference scripts/data/sample.txt`
    (既定のkotoba-whisperと`small`を比較)。
 3. 段階2: 有力なモデルに絞り、`--beam-sizes 1 5 --threads 4 8 --vad on off` で条件を振る。
-4. 結果(RTF・メモリ・CER)から、モデルと定数(`MODEL_NAME`、`CPU_THREADS`、`BEAM_SIZE`)を決め、決定ログに追記する。
+4. 結果(RTF・メモリ・CER)から、モデルと推論パラメータ(スレッド数、`beam_size` など)を決め、決定ログに追記する。
 
 ### 8.3 判断基準
 
@@ -315,7 +345,8 @@ RTF>1のモデルを選ぶ場合は、想定する録音時間と、終了後に
 - **マイク入力**: `AudioSource` を追加し、システム音声とミックスする(または別ストリームにする)。
 - **出力形式**: SRT / JSONL など。セグメントは構造化データなので、Sinkの追加で対応できる。
 - **音声ファイルの文字起こし**: `WavFileSource` を一般化する。
-- **CLIオプション・設定ファイル**: 定数の一部を外に出す。
+- **設定ファイル**: 定数の一部を外に出す。
+- **モデルの追加**: `ModelSpec` を実装して `models.MODELS` に登録すれば、`--model` で選べる。
 - **バックログの破棄を導入する場合**: 上限超過時に、最古の未処理チャンクを `GapMarker(start, end)` に置き換えてキューの順序を保ち、
   出力時に `[00:13:30-00:14:15 欠落: 45.0秒分を破棄]` のようなマーカーを本文に流す。欠落秒数は、残ったチャンクにカバーされていない区間
   (直前に残ったチャンクの終了位置から、次に残ったチャンクの開始位置まで)で計算し、欠落の前後では重複除去をしない。
@@ -332,7 +363,7 @@ RTF>1のモデルを選ぶ場合は、想定する録音時間と、終了後に
 | 4 | 30秒チャンク + 3秒の重なり + VAD | 更新速度は低くてよい。エンコーダが30秒窓固定のため、30秒が効率的 |
 | 5 | 遅れは無制限に許容。未処理音声は破棄しない。破棄マーカーなし | 当初案は「上限超過で破棄+マーカー」。音声は1時間あたり約115MBで、メモリに十分収まるため変更 |
 | 6 | 警告のみの方針。ただし起動時の致命的な状況は終了 | 続行できない状況で動き続けても意味がないため |
-| 7 | CLIは `--device` と `-o` のみ。他の設定は定数 | ユーザー指定。必要になったら足す |
+| 7 | CLIは `--device` と `-o` のみ。他の設定は定数(#20で `--model` を追加) | ユーザー指定。必要になったら足す |
 | 8 | `-o` の既定はカレントディレクトリ | ユーザー指定 |
 | 9 | サブコマンドは `start` / `download-model` / `devices` | モデルの専用DLコマンドはユーザー指定。`devices` は `--device` の指定に必要 |
 | 10 | Python 3.13以降 | ユーザー指定 |
@@ -342,6 +373,7 @@ RTF>1のモデルを選ぶ場合は、想定する録音時間と、終了後に
 | 14 | 最初のタスクはモデル検証(`scripts/bench_models.py`) | ユーザー指定。結果でモデルと定数を確定する |
 | 15 | 実行中のデバイス切断時は、警告を出して録音を停止し、バックログを処理して終了(コード1) | ユーザー確認済み(2026-11-02)。録音済みの音声は無駄にしない |
 | 16 | モデル検証のサンプルは ReazonSpeech `tiny` からローカル生成し、`scripts/data/` に置く。生成した音声とテキストはリポジトリに含めない | ユーザー確認済み(2026-11-02)。システム音声に近く正解がある。利用は情報解析に限り、再配布はしない |
-| 17 | `MODEL_NAME="small"`、`CPU_THREADS=4`、`BEAM_SIZE=1`、`VAD_FILTER=True` | ユーザー確認済み(2026-11-03)。対象PC(i5-8350U)での計測(120秒・17発話)は、`small` / 4スレッド / beam=1 で RTF 0.29、CER 0.190、RSS 約590MB。kotoba-whisper(`chunk_length=15`)は RTF 1.6〜2.2 で遅れが累積し、CERは beam=5 でも 0.178 で `small` と同程度だった。8スレッドは両モデルとも4スレッドより遅い。beam=5 は CER 0.180 で改善が小さく、RTF が 0.39 に上がるため採用しない。kotoba-whisper を使わないので、`chunk_length` の定数は追加しない。詳細は Issue #1 |
+| 17 | `MODEL_NAME="small"`、`CPU_THREADS=4`、`BEAM_SIZE=1`、`VAD_FILTER=True`(#20で、推論パラメータはモデルごとの固定値に、`CPU_THREADS` は論理コア数の半分に変更) | ユーザー確認済み(2026-11-03)。対象PC(i5-8350U)での計測(120秒・17発話)は、`small` / 4スレッド / beam=1 で RTF 0.29、CER 0.190、RSS 約590MB。kotoba-whisper(`chunk_length=15`)は RTF 1.6〜2.2 で遅れが累積し、CERは beam=5 でも 0.178 で `small` と同程度だった。8スレッドは両モデルとも4スレッドより遅い。beam=5 は CER 0.180 で改善が小さく、RTF が 0.39 に上がるため採用しない。kotoba-whisper を使わないので、`chunk_length` の定数は追加しない。詳細は Issue #1 |
 | 18 | 起動時のモデル読み込み中は「読み込み中」と表示する | ユーザー確認済み(2026-11-03)。対象PCでの計測で、1回目の読み込みが `small` で約67秒、kotoba-whisper で約167秒かかった(2回目以降は数秒)。表示がないと、止まったように見える |
 | 19 | 担当割当て(§6.6)は、`word_timestamps=True` で推論し、語ごとの開始時刻で判定する。重なりは3秒のまま | ユーザー確認済み(2026-11-06)。約10分・85発話の音声2本で、セグメントの開始時刻による判定は、全体を1チャンクで処理した場合より CER が 0.05〜0.09 悪く、落ちた発話は5〜11件だった。語単位では CER 0.249 / 0.265(1チャンクは 0.243 / 0.248)、落ちた発話は1件ずつで、RTF は 0.15 から 0.16 への増加にとどまる。重なりを5秒・10秒に広げても改善しなかった。セグメントの中央の時刻で判定する案は、取りこぼしはなくなるが、重複による挿入が増える。詳細は Issue #12、実装は Issue #26 |
+| 20 | `start` と `download-model` に `--model {small,kotoba}`(既定 `small`)を追加する。推論パラメータはオプションにせず、モデルごとのファイルに固定値で持つ(§6.8)。`constants.py` にはモデルに依存しない値だけを残す。`CPU_THREADS` は論理コア数の半分にする。kotoba-whisper の `alignment_heads` は、HFキャッシュの `config.json` をその場で置き換えて直す | ユーザー確認済み(2026-11-08)。JSUTでの検証で、kotoba-whisper は VADで区切った15秒以下のクリップごとに時刻トークンありで推論すると、CER が small より約15〜25%低かった(RTF は開発機で 0.76〜1.00)。対象PCでは遅すぎるので、開発機などで切り替えて使う。推論パラメータはユーザーが調整しきれないので、オプションにしない。`alignment_heads` を直さないと `word_timestamps=True` で異常終了する。`files=` でメモリから渡す方法はRAMが倍になるので採らない。Windowsでの速度の計測は省く。詳細は Issue #29、実装は Issue #32 |
