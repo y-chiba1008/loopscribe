@@ -43,7 +43,10 @@ loopscribe start --device "Speakers"     # デバイスを指定(番号または
 loopscribe start -o D:\notes             # txtの保存先(既定: カレントディレクトリ)
 loopscribe start -n meeting              # ファイル名を指定(meeting.txt。同名があれば meeting_2.txt …)
 loopscribe start --model kotoba          # kotoba-whisper で文字起こし(既定: small)
+loopscribe record -n meeting             # 文字起こしせずに録音だけする(meeting.wav。16kHz・モノラル、1時間で約115MB)
 ```
+
+`record` は `--device` / `-o` / `-n` を `start` と同じように指定できます。Ctrl+C を1回押すと、録音を止めてファイルを確定します。
 
 | `--model` | 特徴 |
 |---|---|
