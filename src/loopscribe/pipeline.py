@@ -78,7 +78,15 @@ class PipelineProgress:
 
 
 class TranscriptionPipeline:
-    """capture / transcribe スレッドで AudioSource から Sink まで流す。"""
+    """capture / transcribe スレッドで AudioSource から Sink まで流す。
+
+    ファイル入力では、次の2つを指定する(ライブ入力では使わない)。
+
+    - `read_ahead_seconds`: 推論に渡していない音声がこの秒数を超えたら、capture を待たせる。
+      `chunk_seconds` 以上にする(次のチャンクの分を読めないと止まるため)。
+    - `process_backlog_on_stop=False`: 停止の指示で、処理中のチャンクを終えたら
+      残りを処理せずに終える。取得の失敗による停止では、ライブ入力と同じく残りを処理する。
+    """
 
     def __init__(
         self,
@@ -96,10 +104,14 @@ class TranscriptionPipeline:
         buffer_warn_mb: float = BUFFER_WARN_MB,
         wait_timeout: float = SIGNAL_POLL_SECONDS,
         ui_refresh_seconds: float = UI_REFRESH_SECONDS,
+        read_ahead_seconds: float | None = None,
+        process_backlog_on_stop: bool = True,
         progress: PipelineProgress | None = None,
         reporter: ProgressReporter | None = None,
         on_warning: Callable[[str], None] | None = None,
     ) -> None:
+        if read_ahead_seconds is not None and read_ahead_seconds < chunk_seconds:
+            raise ValueError("read_ahead_seconds は chunk_seconds 以上であること")
         self._transcriber = transcriber
         self._sink = sink
         self._stop_event = stop_event
@@ -112,13 +124,23 @@ class TranscriptionPipeline:
         self._buffer_warn_mb = buffer_warn_mb
         self._wait_timeout = wait_timeout
         self._ui_refresh_seconds = ui_refresh_seconds
+        self._read_ahead_samples = (
+            None if read_ahead_seconds is None else int(round(read_ahead_seconds * sample_rate))
+        )
+        self._process_backlog_on_stop = process_backlog_on_stop
         self._progress = progress if progress is not None else PipelineProgress()
         self._reporter = reporter
         self._on_warning = on_warning
         self._buffer = AudioBuffer()
         self._lock = threading.Lock()
+        # 推論に渡した音声の終端(サンプル位置)。先読みの上限の判定に使う
+        self._consumed_cond = threading.Condition()
+        self._consumed_samples = 0
         self._lag_warn_level = 0
         self._buffer_warned = False
+        self._transcribe_thread = threading.Thread(
+            target=self._transcribe_loop, name="transcribe", daemon=True
+        )
         self._capture = AudioCapture(
             source,
             self._append_converted,
@@ -139,7 +161,7 @@ class TranscriptionPipeline:
         (Windows でシグナル処理が遅れないようにするため。)
         """
         capture = self._capture
-        transcribe = threading.Thread(target=self._transcribe_loop, name="transcribe", daemon=True)
+        transcribe = self._transcribe_thread
         capture.start()
         transcribe.start()
         try:
@@ -177,6 +199,33 @@ class TranscriptionPipeline:
         self._buffer.append(samples)
         self._refresh_recorded()
         self._maybe_warn_buffer()
+        self._wait_for_read_ahead()
+
+    def _wait_for_read_ahead(self) -> None:
+        """未処理の音声が先読みの上限を超えている間、capture を待たせる。"""
+        limit = self._read_ahead_samples
+        if limit is None:
+            return
+        with self._consumed_cond:
+            while (
+                self._buffer.total_samples - self._consumed_samples >= limit
+                and not self._stop_event.is_set()
+                and self._transcribe_thread.is_alive()
+            ):
+                self._consumed_cond.wait(timeout=self._wait_timeout)
+
+    def _mark_consumed(self, end_sample: int) -> None:
+        with self._consumed_cond:
+            self._consumed_samples = max(self._consumed_samples, end_sample)
+            self._consumed_cond.notify_all()
+
+    def _interrupted(self) -> bool:
+        """停止の指示で、残りを処理せずに終えるか。"""
+        return (
+            not self._process_backlog_on_stop
+            and self._stop_event.is_set()
+            and not self._capture.failed
+        )
 
     def _on_capture_finished(self) -> None:
         self._buffer.close()
@@ -204,6 +253,8 @@ class TranscriptionPipeline:
         pending: tuple[ChunkSpan, list[Segment]] | None = None
 
         while True:
+            if self._interrupted():
+                break
             need = int(
                 round(
                     chunk_ready_at(
@@ -215,8 +266,10 @@ class TranscriptionPipeline:
                 )
             )
             while not self._buffer.wait_for(need, timeout=self._wait_timeout):
-                if self._buffer.closed:
+                if self._buffer.closed or self._interrupted():
                     break
+            if self._interrupted():
+                break
             recorded = self._buffer.total_samples / self._sample_rate
             if is_chunk_ready(
                 index,
@@ -240,7 +293,7 @@ class TranscriptionPipeline:
                 break
 
         recorded = self._buffer.total_samples / self._sample_rate
-        while is_chunk_ready(
+        while not self._interrupted() and is_chunk_ready(
             index,
             recorded,
             chunk_seconds=self._chunk_seconds,
@@ -256,6 +309,12 @@ class TranscriptionPipeline:
             segments = self._transcribe_span(span)
             pending = (span, segments)
             index += 1
+
+        if self._interrupted():
+            # 処理済みのチャンクまでを出力して終える(担当範囲の上限は外す)
+            if pending is not None:
+                self._finalize_chunk(pending[0], pending[1], is_last=True)
+            return
 
         tail = tail_span_after_stop(
             recorded,
@@ -283,6 +342,7 @@ class TranscriptionPipeline:
     def _transcribe_span(self, span: ChunkSpan) -> list[Segment]:
         start = int(round(span.start * self._sample_rate))
         end = int(round(span.end * self._sample_rate))
+        self._mark_consumed(end)
         end = min(end, self._buffer.total_samples)
         if end <= start:
             return []

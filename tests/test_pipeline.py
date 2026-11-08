@@ -357,6 +357,183 @@ def test_pipeline_stop_while_source_silent_flushes_and_exits() -> None:
     assert lines == ["未出力"]
 
 
+class _CountingSource:
+    """0.1秒のブロックを `n_blocks` 個返す。返した数を数える。"""
+
+    sample_rate = 16_000
+    channels = 1
+
+    def __init__(self, n_blocks: int) -> None:
+        self._n_blocks = n_blocks
+        self.blocks_yielded = 0
+
+    def __iter__(self):
+        for _ in range(self._n_blocks):
+            self.blocks_yielded += 1
+            yield np.zeros((1_600, 1), dtype=np.float32)
+
+    def close(self) -> None:
+        return None
+
+
+class _GatedTranscriber(FakeTranscriber):
+    """呼ばれたことを知らせ、`release` がセットされるまで推論を終えない。"""
+
+    def __init__(self, responses: list[list[Segment]] | None = None) -> None:
+        super().__init__(responses)
+        self.called = threading.Event()
+        self.release = threading.Event()
+
+    def transcribe(self, samples: np.ndarray) -> list[Segment]:
+        result = super().transcribe(samples)
+        self.called.set()
+        assert self.release.wait(timeout=5.0)
+        return result
+
+
+def _start_pipeline(pipeline: TranscriptionPipeline) -> tuple[threading.Thread, list[int]]:
+    result: list[int] = []
+    runner = threading.Thread(target=lambda: result.append(pipeline.run()), daemon=True)
+    runner.start()
+    return runner, result
+
+
+def _silent_console() -> Console:
+    return Console(file=StringIO(), force_terminal=False, width=120, highlight=False)
+
+
+def test_pipeline_read_ahead_limits_capture() -> None:
+    """推論に渡していない音声が上限に達したら、取得を待たせる。"""
+    source = _CountingSource(300)
+    fake = _GatedTranscriber()
+    pipeline = TranscriptionPipeline(
+        source,
+        fake,
+        MultiSink([]),
+        stop_event=threading.Event(),
+        console=_silent_console(),
+        chunk_seconds=4.0,
+        overlap_seconds=1.0,
+        wait_timeout=0.05,
+        ui_refresh_seconds=0.05,
+        read_ahead_seconds=8.0,
+    )
+    runner, result = _start_pipeline(pipeline)
+
+    assert fake.called.wait(timeout=5.0)
+    time.sleep(0.3)
+    # チャンク0(0〜4秒)を推論中。読み込みは 4 + 8 秒で止まる
+    assert source.blocks_yielded * 0.1 == pytest.approx(12.0, abs=0.2)
+
+    fake.release.set()
+    runner.join(timeout=5.0)
+    assert not runner.is_alive()
+    assert result == [0]
+    assert source.blocks_yielded == 300
+    assert pipeline.progress.processed_seconds == pytest.approx(30.0, abs=0.05)
+
+
+def test_pipeline_read_ahead_must_cover_chunk() -> None:
+    with pytest.raises(ValueError, match="read_ahead_seconds"):
+        TranscriptionPipeline(
+            _CountingSource(1),
+            FakeTranscriber(),
+            MultiSink([]),
+            stop_event=threading.Event(),
+            console=_silent_console(),
+            chunk_seconds=4.0,
+            overlap_seconds=1.0,
+            read_ahead_seconds=3.0,
+        )
+
+
+def test_pipeline_stop_without_backlog_outputs_current_chunk_only() -> None:
+    """停止の指示で、処理中のチャンクを終えたら、そこまでを出力して残りは処理しない。"""
+    stop = threading.Event()
+    source = _CountingSource(300)
+    # チャンク0の 3.8秒の語は、通常ならチャンク1の担当(3.5秒〜)。中断時は最終チャンクとして出す
+    fake = _GatedTranscriber(
+        [
+            [
+                Segment(start=1.0, end=1.2, text="前半", words=_words(0.0, (1.0, "前半"))),
+                Segment(start=3.8, end=4.0, text="境目", words=_words(0.0, (3.8, "境目"))),
+            ],
+            [Segment(start=2.0, end=2.2, text="未処理")],
+        ]
+    )
+    segments: list[AbsoluteSegment] = []
+
+    class CollectSink:
+        def write(self, segment: AbsoluteSegment) -> None:
+            segments.append(segment)
+
+        def close(self) -> None:
+            return
+
+    pipeline = TranscriptionPipeline(
+        source,
+        fake,
+        CollectSink(),
+        stop_event=stop,
+        console=_silent_console(),
+        chunk_seconds=4.0,
+        overlap_seconds=1.0,
+        wait_timeout=0.05,
+        ui_refresh_seconds=0.05,
+        read_ahead_seconds=8.0,
+        process_backlog_on_stop=False,
+    )
+    runner, result = _start_pipeline(pipeline)
+
+    assert fake.called.wait(timeout=5.0)
+    stop.set()
+    fake.release.set()
+    runner.join(timeout=5.0)
+    assert not runner.is_alive()
+    assert result == [0]
+    assert len(fake.calls) == 1
+    assert [s.text for s in segments] == ["前半", "境目"]
+    assert source.blocks_yielded < 300
+    assert pipeline.progress.processed_seconds == pytest.approx(4.0)
+
+
+def test_pipeline_capture_failure_still_processes_backlog_without_backlog_mode() -> None:
+    """取得の失敗による停止では、ファイル入力でも残りを処理する(終了コード1)。"""
+
+    class FailingSource(_CountingSource):
+        def __iter__(self):
+            yield from super().__iter__()
+            raise OSError("read error")
+
+    lines: list[str] = []
+
+    class CollectSink:
+        def write(self, segment: AbsoluteSegment) -> None:
+            lines.append(segment.text)
+
+        def close(self) -> None:
+            return
+
+    fake = FakeTranscriber(
+        [[Segment(start=0.5, end=0.7, text="一")], [Segment(start=1.0, end=1.2, text="二")]]
+    )
+    pipeline = TranscriptionPipeline(
+        FailingSource(70),
+        fake,
+        CollectSink(),
+        stop_event=threading.Event(),
+        console=_silent_console(),
+        chunk_seconds=4.0,
+        overlap_seconds=1.0,
+        wait_timeout=0.05,
+        read_ahead_seconds=8.0,
+        process_backlog_on_stop=False,
+        on_warning=lambda _message: None,
+    )
+    assert pipeline.run() == 1
+    assert lines == ["一", "二"]
+
+
 def test_pipeline_writes_txt(tmp_path: Path) -> None:
     wav = tmp_path / "d.wav"
     out = tmp_path / "out.txt"
