@@ -1,4 +1,4 @@
-"""取得・変換・チャンク文字起こし・出力のパイプライン。"""
+"""取得・変換・チャンク文字起こし・出力のパイプライン。取得は `capture.AudioCapture` に任せる。"""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ import numpy as np
 from numpy.typing import NDArray
 from rich.console import Console
 
-from loopscribe.audio.convert import AudioConverter
 from loopscribe.audio.source import AudioSource
 from loopscribe.buffer import AudioBuffer
+from loopscribe.capture import AudioCapture
 from loopscribe.chunker import (
     ChunkSpan,
     OwnershipBounds,
@@ -100,7 +100,6 @@ class TranscriptionPipeline:
         reporter: ProgressReporter | None = None,
         on_warning: Callable[[str], None] | None = None,
     ) -> None:
-        self._source = source
         self._transcriber = transcriber
         self._sink = sink
         self._stop_event = stop_event
@@ -120,7 +119,14 @@ class TranscriptionPipeline:
         self._lock = threading.Lock()
         self._lag_warn_level = 0
         self._buffer_warned = False
-        self._capture_failed = False
+        self._capture = AudioCapture(
+            source,
+            self._append_converted,
+            stop_event=stop_event,
+            on_warning=self._warn,
+            on_finish=self._on_capture_finished,
+            sample_rate=sample_rate,
+        )
 
     @property
     def progress(self) -> PipelineProgress:
@@ -132,19 +138,14 @@ class TranscriptionPipeline:
         メインスレッドは短いタイムアウトで join を繰り返し、プログレスを更新する。
         (Windows でシグナル処理が遅れないようにするため。)
         """
-        capture = threading.Thread(target=self._capture_loop, name="capture", daemon=True)
+        capture = self._capture
         transcribe = threading.Thread(target=self._transcribe_loop, name="transcribe", daemon=True)
         capture.start()
         transcribe.start()
-        source_closed = False
         try:
             while capture.is_alive() or transcribe.is_alive():
                 self._refresh_reporter()
-                if self._stop_event.is_set() and not source_closed:
-                    # 無音時の WASAPI はブロックを返さず、capture 側が停止に気づけない
-                    source_closed = True
-                    with contextlib.suppress(Exception):
-                        self._source.close()
+                capture.close_source_if_stopped()
                 if capture.is_alive():
                     capture.join(timeout=self._ui_refresh_seconds)
                 else:
@@ -155,7 +156,7 @@ class TranscriptionPipeline:
                 self._sink.close()
             with self._lock:
                 self._progress.done = True
-                self._progress.exit_code = 1 if self._capture_failed else 0
+                self._progress.exit_code = 1 if capture.failed else 0
         return self._progress.exit_code
 
     def _refresh_reporter(self) -> None:
@@ -172,40 +173,14 @@ class TranscriptionPipeline:
         else:
             self._console.print(f"[yellow]警告:[/yellow] {message}")
 
-    def _capture_loop(self) -> None:
-        converter = AudioConverter(
-            self._source.sample_rate,
-            self._source.channels,
-            out_rate=self._sample_rate,
-        )
-        try:
-            for block in self._source:
-                if self._stop_event.is_set():
-                    break
-                converted = converter.convert(block)
-                self._append_converted(converted)
-            # 停止または EOF: リサンプラをフラッシュ
-            converted = converter.convert(
-                np.empty((0, self._source.channels), dtype=np.float32),
-                last=True,
-            )
-            self._append_converted(converted)
-        except Exception as exc:
-            self._capture_failed = True
-            self._warn(f"音声の取得に失敗したため録音を停止します: {exc}")
-            self._stop_event.set()
-        finally:
-            with contextlib.suppress(Exception):
-                self._source.close()
-            self._buffer.close()
-            self._refresh_recorded()
-
     def _append_converted(self, samples: NDArray[np.int16]) -> None:
-        if samples.size == 0:
-            return
         self._buffer.append(samples)
         self._refresh_recorded()
         self._maybe_warn_buffer()
+
+    def _on_capture_finished(self) -> None:
+        self._buffer.close()
+        self._refresh_recorded()
 
     def _refresh_recorded(self) -> None:
         recorded = self._buffer.total_samples / self._sample_rate
