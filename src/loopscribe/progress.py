@@ -1,4 +1,4 @@
-"""処理済み / 録音のプログレスバー表示。"""
+"""処理済み / 録音のプログレスバー表示と、`record` の録音状況の表示。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from rich.console import Console
-from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.status import Status
 
 from loopscribe.constants import UI_REFRESH_SECONDS
@@ -96,6 +96,66 @@ class ProgressReporter:
             processed=format_duration(processed),
             recorded=format_duration(recorded),
             lag=format_duration(lag_seconds(processed, recorded)),
+        )
+
+
+def format_size(num_bytes: int) -> str:
+    """バイト数を MB で表す(小数1桁)。"""
+    return f"{max(0, num_bytes) / (1024 * 1024):.1f}MB"
+
+
+class RecordingReporter:
+    """`record` の録音時間とファイルサイズの表示。
+
+    標準出力が TTY でない場合は無効化する。
+    """
+
+    def __init__(
+        self,
+        console: Console,
+        *,
+        enabled: bool | None = None,
+        refresh_seconds: float = UI_REFRESH_SECONDS,
+    ) -> None:
+        if enabled is None:
+            enabled = bool(console.is_terminal)
+        self.console = console
+        self._enabled = enabled
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("録音 {task.fields[recorded]}  ファイル {task.fields[size]}"),
+            console=console,
+            transient=False,
+            disable=not enabled,
+            refresh_per_second=max(1.0, 1.0 / refresh_seconds) if refresh_seconds > 0 else 2.0,
+        )
+        self._task_id: int | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def __enter__(self) -> RecordingReporter:
+        self._progress.start()
+        self._task_id = self._progress.add_task(
+            "record",
+            total=None,
+            recorded=format_duration(0.0),
+            size=format_size(0),
+        )
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._progress.stop()
+        self._task_id = None
+
+    def update(self, recorded_seconds: float, written_bytes: int) -> None:
+        if self._task_id is None:
+            return
+        self._progress.update(
+            self._task_id,
+            recorded=format_duration(recorded_seconds),
+            size=format_size(written_bytes),
         )
 
 

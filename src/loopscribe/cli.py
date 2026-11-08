@@ -1,4 +1,4 @@
-"""Typer による CLI。サブコマンド: start / download-model / devices。"""
+"""Typer による CLI。サブコマンド: start / record / download-model / devices。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import os
 import signal
 import sys
 import threading
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -17,7 +18,7 @@ import typer
 from rich.console import Console
 
 from loopscribe.audio.source import AudioSource
-from loopscribe.constants import OUTPUT_NAME_FORMAT, TRANSCRIPT_SUFFIX
+from loopscribe.constants import OUTPUT_NAME_FORMAT, RECORDING_SUFFIX, TRANSCRIPT_SUFFIX
 from loopscribe.errors import FatalStartupError, InvalidOutputNameError, ModelUnavailableError
 from loopscribe.models import DEFAULT_MODEL, MODELS, get_model
 from loopscribe.output import (
@@ -28,7 +29,8 @@ from loopscribe.output import (
     unique_output_path,
 )
 from loopscribe.pipeline import PipelineProgress, TranscriptionPipeline
-from loopscribe.progress import ProgressReporter, model_loading_status
+from loopscribe.progress import ProgressReporter, RecordingReporter, model_loading_status
+from loopscribe.recorder import Recorder, WavWriter
 
 app = typer.Typer(
     name="loopscribe",
@@ -46,6 +48,24 @@ ModelOption = Annotated[
     typer.Option(
         "--model",
         help="文字起こしのモデル。kotoba は small より高精度だが、遅くRAMも多く使う",
+    ),
+]
+
+DeviceOption = Annotated[
+    str | None,
+    typer.Option("--device", help="出力デバイス(番号、または名前の一部)。既定は既定デバイス"),
+]
+
+OutputDirOption = Annotated[
+    Path,
+    typer.Option(
+        "-o",
+        "--output-dir",
+        help="出力ファイルの保存先ディレクトリ(既定: カレントディレクトリ)",
+        file_okay=False,
+        dir_okay=True,
+        writable=True,
+        resolve_path=False,
     ),
 ]
 
@@ -118,6 +138,70 @@ def resolve_output_path(console: Console, output_dir: Path, stem: str, suffix: s
     return path
 
 
+def _resolve_named_output(
+    console: Console, output_dir: Path, output_name: str | None, suffix: str
+) -> Path | None:
+    """`-n` の名前を検査し、出力先を決める(未指定なら None)。不正な名前は終了コード1。"""
+    if output_name is None:
+        return None
+    try:
+        stem = normalize_output_name(output_name)
+    except InvalidOutputNameError as exc:
+        console.print(f"[red]エラー:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    return resolve_output_path(console, output_dir, stem, suffix)
+
+
+def _open_loopback_source(console: Console, device: str | None) -> AudioSource:
+    """WASAPI ループバックの取得を開く。失敗したら終了コード1。"""
+    try:
+        wasapi = _load_wasapi()
+        return wasapi.open_loopback_source(device)
+    except FatalStartupError as exc:
+        console.print(f"[red]エラー:[/red] {exc}")
+        if "デバイス" in str(exc):
+            console.print("`loopscribe devices` で一覧を確認してください。")
+        raise typer.Exit(1) from exc
+    except Exception as exc:
+        console.print(f"[red]エラー:[/red] 音声デバイスの開始に失敗しました: {exc}")
+        console.print("`loopscribe devices` で一覧を確認してください。")
+        raise typer.Exit(1) from exc
+
+
+@contextlib.contextmanager
+def _handle_sigint(
+    console: Console,
+    stop: threading.Event,
+    *,
+    first_message: str,
+    on_force_exit: Callable[[], None] | None = None,
+) -> Iterator[None]:
+    """Ctrl+C 1回目で `stop` をセットする。
+
+    2回目は `on_force_exit` を呼んで、終了コード130で即時終了する。
+    """
+    interrupt_count = 0
+
+    def _on_sigint(_signum: int, _frame: object) -> None:
+        nonlocal interrupt_count
+        interrupt_count += 1
+        if interrupt_count == 1:
+            console.print(f"\n停止信号を受け取りました。{first_message}")
+            stop.set()
+            return
+        console.print("\n2回目の停止信号です。直ちに終了します。")
+        if on_force_exit is not None:
+            with contextlib.suppress(Exception):
+                on_force_exit()
+        os._exit(130)
+
+    previous = signal.signal(signal.SIGINT, _on_sigint)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def run_transcription(
     source: AudioSource,
     *,
@@ -157,29 +241,10 @@ def run_transcription(
             # モデルの読み込み中に、同名のファイルが作られた場合
             txt_path = resolve_output_path(console, txt_path.parent, txt_path.stem, txt_path.suffix)
 
-    sink_holder: dict[str, MultiSink | None] = {"sink": None}
-    interrupt_count = 0
-
-    def _on_sigint(_signum: int, _frame: object) -> None:
-        nonlocal interrupt_count
-        interrupt_count += 1
-        if interrupt_count == 1:
-            console.print("\n停止信号を受け取りました。録音を止め、残りを処理します...")
-            stop.set()
-            return
-        console.print("\n2回目の停止信号です。直ちに終了します。")
-        sink = sink_holder["sink"]
-        if sink is not None:
-            with contextlib.suppress(Exception):
-                sink.close()
-        os._exit(130)
-
-    previous = signal.signal(signal.SIGINT, _on_sigint)
-    try:
-        console_sink = ConsoleSink(console)
-        sink = MultiSink([console_sink, txt_sink])
-        sink_holder["sink"] = sink
-
+    sink = MultiSink([ConsoleSink(console), txt_sink])
+    with _handle_sigint(
+        console, stop, first_message="録音を止め、残りを処理します...", on_force_exit=sink.close
+    ):
         console.print(f"録音を開始します ({started_at.strftime('%Y-%m-%d %H:%M:%S')})")
         console.print(f"出力: {txt_path}")
 
@@ -195,8 +260,52 @@ def run_transcription(
                 reporter=reporter,
             )
             return pipeline.run()
-    finally:
-        signal.signal(signal.SIGINT, previous)
+
+
+def run_recording(
+    source: AudioSource,
+    *,
+    console: Console,
+    output_dir: Path,
+    output_path: Path | None = None,
+    stop_event: threading.Event | None = None,
+) -> int:
+    """AudioSource を wav に録音する。
+
+    `output_path` は `resolve_output_path` で決めた wav のパス。
+    未指定なら、開始時刻から `OUTPUT_NAME_FORMAT` で作り、`output_dir` に置く。
+    """
+    stop = stop_event if stop_event is not None else threading.Event()
+
+    started_at = datetime.now()
+    wav_path = output_path or resolve_output_path(
+        console, output_dir, started_at.strftime(OUTPUT_NAME_FORMAT), RECORDING_SUFFIX
+    )
+    try:
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            try:
+                writer = WavWriter(wav_path)
+                break
+            except FileExistsError:
+                wav_path = resolve_output_path(
+                    console, wav_path.parent, wav_path.stem, wav_path.suffix
+                )
+    except OSError as exc:
+        with contextlib.suppress(Exception):
+            source.close()
+        console.print(f"[red]エラー:[/red] wav を作成できません: {exc}")
+        return 1
+
+    with _handle_sigint(console, stop, first_message="録音を止め、ファイルを確定します..."):
+        console.print(f"録音を開始します ({started_at.strftime('%Y-%m-%d %H:%M:%S')})")
+        console.print(f"出力: {wav_path}")
+
+        with RecordingReporter(console) as reporter:
+            recorder = Recorder(source, writer, stop_event=stop, console=console, reporter=reporter)
+            code = recorder.run()
+        console.print(f"録音を終了しました: {wav_path}")
+        return code
 
 
 @app.command("download-model")
@@ -232,49 +341,16 @@ def devices_cmd() -> None:
 
 @app.command("start")
 def start_cmd(
-    device: Annotated[
-        str | None,
-        typer.Option("--device", help="出力デバイス(番号、または名前の一部)。既定は既定デバイス"),
-    ] = None,
-    output_dir: Annotated[
-        Path,
-        typer.Option(
-            "-o",
-            "--output-dir",
-            help="txt の保存先ディレクトリ(既定: カレントディレクトリ)",
-            file_okay=False,
-            dir_okay=True,
-            writable=True,
-            resolve_path=False,
-        ),
-    ] = Path("."),
+    device: DeviceOption = None,
+    output_dir: OutputDirOption = Path("."),
     output_name: OutputNameOption = None,
     model: ModelOption = _DEFAULT_MODEL_NAME,
 ) -> None:
     """システム音声の取得と文字起こしを開始する。"""
     console = _make_console()
     _require_windows(console)
-    txt_path: Path | None = None
-    if output_name is not None:
-        try:
-            stem = normalize_output_name(output_name)
-        except InvalidOutputNameError as exc:
-            console.print(f"[red]エラー:[/red] {exc}")
-            raise typer.Exit(1) from exc
-        txt_path = resolve_output_path(console, output_dir, stem, TRANSCRIPT_SUFFIX)
-    try:
-        wasapi = _load_wasapi()
-        source = wasapi.open_loopback_source(device)
-    except FatalStartupError as exc:
-        console.print(f"[red]エラー:[/red] {exc}")
-        if "デバイス" in str(exc):
-            console.print("`loopscribe devices` で一覧を確認してください。")
-        raise typer.Exit(1) from exc
-    except Exception as exc:
-        console.print(f"[red]エラー:[/red] 音声デバイスの開始に失敗しました: {exc}")
-        console.print("`loopscribe devices` で一覧を確認してください。")
-        raise typer.Exit(1) from exc
-
+    txt_path = _resolve_named_output(console, output_dir, output_name, TRANSCRIPT_SUFFIX)
+    source = _open_loopback_source(console, device)
     code = run_transcription(
         source,
         console=console,
@@ -282,4 +358,19 @@ def start_cmd(
         model_name=model.value,
         output_path=txt_path,
     )
+    raise typer.Exit(code)
+
+
+@app.command("record")
+def record_cmd(
+    device: DeviceOption = None,
+    output_dir: OutputDirOption = Path("."),
+    output_name: OutputNameOption = None,
+) -> None:
+    """システム音声を wav(16kHz・モノラル・16bit PCM)に録音する。文字起こしはしない。"""
+    console = _make_console()
+    _require_windows(console)
+    wav_path = _resolve_named_output(console, output_dir, output_name, RECORDING_SUFFIX)
+    source = _open_loopback_source(console, device)
+    code = run_recording(source, console=console, output_dir=output_dir, output_path=wav_path)
     raise typer.Exit(code)

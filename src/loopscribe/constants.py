@@ -23,10 +23,13 @@ LAG_WARN_SECONDS = 600.0
 BUFFER_WARN_MB = 2048.0
 UI_REFRESH_SECONDS = 0.5
 SIGNAL_POLL_SECONDS = 0.2
+# record: この秒数ぶん溜まるごとに wav へ書いて flush する
+RECORD_FLUSH_SECONDS = 1.0
 
 # `-n/--output-name` 未指定時の出力名(拡張子なし)。拡張子はコマンドが付ける
 OUTPUT_NAME_FORMAT = "loopscribe_%Y%m%d_%H%M%S"
 TRANSCRIPT_SUFFIX = ".txt"
+RECORDING_SUFFIX = ".wav"
 # `-n/--output-name` の末尾にあれば取り除く拡張子
 OUTPUT_NAME_STRIP_SUFFIXES = (".txt", ".wav")
 OUTPUT_ENCODING = "utf-8"

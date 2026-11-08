@@ -53,12 +53,14 @@ src/loopscribe/
 │   ├── wasapi.py     # WasapiLoopbackSource(Windows専用。importは遅延させる)
 │   ├── wavfile.py    # WavFileSource(開発・テスト用。WSLで動く)
 │   └── convert.py    # モノラル化 + 16kHzへのリサンプル(soxr.ResampleStream)
+├── capture.py        # AudioCapture(取得と変換のスレッド。start と record で共有)
 ├── buffer.py         # AudioBuffer(int16 / 16kHz / モノラル。スレッドセーフ)
 ├── chunker.py        # チャンク区間と担当境界の計算
 ├── transcriber.py    # Transcriber プロトコル、Segment / Word、faster-whisperの結果の変換
 ├── pipeline.py       # スレッド構成、チャンク処理、セグメントの担当割当て
+├── recorder.py       # record の録音(WavWriter で wav に追記。Recorder)
 ├── output.py         # コンソール出力とtxt出力(Sink)、出力名の検査と連番付け
-└── progress.py       # プログレスバー(rich)
+└── progress.py       # プログレスバー(rich)。record の録音時間・ファイルサイズの表示
 scripts/bench_models.py          # モデル検証用(単体で動く。PEP 723)
 scripts/prepare_bench_audio.py   # 検証用wavの作成(ReazonSpeech。生成物は scripts/data/ で gitignore)
 scripts/run_wav.py               # 本番と同じパイプラインでwavを流す(`transcribe` の実装時に削除する。#35)

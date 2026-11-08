@@ -145,6 +145,8 @@ AudioSource(差し替え可能) ──► convert ──► AudioBuffer ──�
 | transcribe | `AudioBuffer` からチャンクを切り出し、`Transcriber` で処理し、Sinkへ出力する |
 | main | プログレスバーの更新と、シグナル待ち(`Event.wait(timeout)` を短い間隔で繰り返す) |
 
+captureスレッドは `capture.AudioCapture` で、`start` と `record`(§6.9)で共有する。
+
 推論はネイティブコードの呼び出しで、その間はPythonのシグナル処理が遅れる。
 メインスレッドで推論するとCtrl+Cが効くまでに時間がかかるため、**推論は必ず別スレッドで実行する**。
 Windowsでは `Event.wait()` をタイムアウトなしで呼ぶとシグナルで中断できない場合があるため、短いタイムアウトを繰り返す。
@@ -257,8 +259,27 @@ Windowsでは `Event.wait()` をタイムアウトなしで呼ぶとシグナル
   - `snapshots/<リビジョン>/config.json` は、実体(`blobs/`)へのシンボリックリンク(Windowsでは通常のファイルのこともある)。
     修正した内容を一時ファイルに書き、`os.replace` でリンクごと置き換える。`blobs/` の実体には触らない。
   - huggingface_hub は、ファイルがあれば取り直さないので、修正は残る。
-  - 確認と修正は、`download-model` の後と、`start` の起動時に毎回行う。値が違うときだけ書き換える
+  -   確認と修正は、`download-model` の後と、`start` の起動時に毎回行う。値が違うときだけ書き換える
     (新しいリビジョンを取り直した場合や、別のツールで取得した場合にも直る)。
+
+### 6.9 録音(`record`。Issue #36)
+
+```
+AudioSource ──► AudioCapture(convert)──► WavWriter(16kHz・モノラル・16bit PCM の wav)
+                                              ▲
+                          RecordingReporter ◄─┘(録音時間 / ファイルサイズ)
+```
+
+- スレッドは capture と main だけ(モデルは読み込まない)。取得と変換は `start` と同じ `AudioCapture` を使い、
+  `AudioBuffer` には溜めずに `WavWriter` へ追記する(`recorder.Recorder`)。
+- `WavWriter` は標準ライブラリの `wave` で書く。`writeframes` は書くたびにヘッダの長さを更新するので、
+  `RECORD_FLUSH_SECONDS`(1秒)ぶん溜まるごとにまとめて書き、ファイルを flush する。落ちても、そこまでは読める wav が残る。
+  ファイルは新規作成のモードで開く(§5.1)。
+- 1時間で約115MB。WAV の4GB上限まで約37時間。`transcribe` でそのまま読める。
+- WASAPI が無音の間データを返さないデバイスでは、無音の区間が詰まる(§6.4)。`start` のタイムスタンプと同じ基準なので、そのままにする。
+- 表示は `録音 HH:MM:SS  ファイル 12.3MB`(richのスピナー付き)。標準出力がTTYでない場合は出さない。
+- Ctrl+C 1回目: 録音を止めてファイルを確定し、終了コード0。2回目: 即時終了(130。flush 済みの分までは読める)。
+- デバイスの切断などで取得が失敗した場合: 警告を出してファイルを確定し、終了コード1(§9)。
 
 ## 7. 定数(`constants.py`)
 
@@ -274,8 +295,10 @@ Windowsでは `Event.wait()` をタイムアウトなしで呼ぶとシグナル
 | `LAG_WARN_SECONDS` | 600 | 遅れがこの値の倍数を超えるたびに、警告を1回出す |
 | `BUFFER_WARN_MB` | 2048 | バッファがこの量を超えたら警告(破棄はしない) |
 | `UI_REFRESH_SECONDS` / `SIGNAL_POLL_SECONDS` | 0.5 / 0.2 | |
+| `RECORD_FLUSH_SECONDS` | 1.0 | `record` で、この秒数ぶん溜まるごとに wav へ書いて flush する(§6.9) |
 | `OUTPUT_NAME_FORMAT` | `loopscribe_%Y%m%d_%H%M%S` | `-n` 未指定時の出力名(拡張子なし) |
 | `TRANSCRIPT_SUFFIX` | `.txt` | 文字起こしの出力の拡張子 |
+| `RECORDING_SUFFIX` | `.wav` | 録音(`record`)の出力の拡張子 |
 | `OUTPUT_NAME_STRIP_SUFFIXES` | `(".txt", ".wav")` | `-n` の末尾にあれば取り除く拡張子 |
 | `OUTPUT_ENCODING` | `"utf-8"` | |
 
@@ -331,7 +354,8 @@ RTF>1のモデルを選ぶ場合は、想定する録音時間と、終了後に
 | 実行中: 処理が追いつかず、遅れが増える | 警告のみ。`LAG_WARN_SECONDS` の倍数を超えるたびに、1回だけ表示する。音声は破棄しない |
 | 実行中: バッファが `BUFFER_WARN_MB` を超えた | 警告のみ。破棄はしない |
 | 実行中: 1チャンクの推論で例外が出た | 警告(該当区間の時刻を含める)を出し、そのチャンクをスキップして継続する。txtには何も書かない |
-| 実行中: 取得ストリームの失敗・デバイスの切断 | 警告を出して録音を停止し、バックログを処理してから終了(コード1)。**確定** |
+| 実行中: 取得ストリームの失敗・デバイスの切断 | 警告を出して録音を停止し、バックログを処理してから終了(コード1)。**確定**。`record` では、警告を出してファイルを確定し、終了(コード1) |
+| 実行中(`record`): wav の書き込みに失敗した(ディスクの空き不足など) | 警告を出して録音を停止し、書けた分までのファイルを確定して終了(コード1) |
 
 ## 10. テスト・開発・配布
 
