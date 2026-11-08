@@ -10,7 +10,8 @@ GPU不要・従量課金なし。音声は外部に送信されません(通信�
 ## 特徴(予定)
 
 - WASAPIループバックで、再生中の音声をそのまま取得(Windowsのみ)
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) + Whisper `small` で日本語を文字起こし(CPU / int8)
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) + Whisper `small` で日本語を文字起こし(CPU / int8)。
+  `--model kotoba` で、より高精度な [kotoba-whisper](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-faster) に切り替えられる
 - 約30秒ごとにまとめて処理(リアルタイム性より、低スペックPCでの安定動作を優先)
 - 結果をコンソールとtxtファイル(タイムスタンプ付き)に出力
 - 進捗(処理済み時間 / 録音時間)をプログレスバーで表示
@@ -30,6 +31,7 @@ GPU不要・従量課金なし。音声は外部に送信されません(通信�
 # Windows側で実行
 uv tool install git+https://github.com/<account>/loopscribe
 loopscribe download-model   # 省略可。未取得なら start 時に自動で取得される
+loopscribe download-model --model kotoba   # kotoba-whisper を使う場合(約1.5GB)
 ```
 
 ## 使い方(予定)
@@ -39,7 +41,15 @@ loopscribe devices                       # ループバック対象の出力デ�
 loopscribe start                         # 既定の出力デバイスの音声を文字起こし(Ctrl+Cで停止)
 loopscribe start --device "Speakers"     # デバイスを指定(番号または名前の一部)
 loopscribe start -o D:\notes             # txtの保存先(既定: カレントディレクトリ)
+loopscribe start --model kotoba          # kotoba-whisper で文字起こし(既定: small)
 ```
+
+| `--model` | 特徴 |
+|---|---|
+| `small`(既定) | 速い。想定PC(i5-8350U)でも遅れずに処理できる(RTF 約0.3) |
+| `kotoba` | 精度が高い(文字誤り率が small より約15〜25%低い)が遅い。6コアのPCでも RTF 約0.8〜1.0、想定PCでは処理が遅れ続ける。RAMも多く使う |
+
+推論の細かいパラメータは、モデルごとに固定値を用意しています(オプションでは変えられません)。
 
 - Ctrl+C を1回押すと録音を止め、未処理の音声を最後まで処理してから終了します。
   もう一度押すと、その場で中断します。
@@ -50,7 +60,7 @@ loopscribe start -o D:\notes             # txtの保存先(既定: カレント�
   [00:00:41] 次の話題ですが…
   ```
 
-設定値(モデル、チャンク長など)はCLIオプションではなく、`src/loopscribe/constants.py` で定義します。
+チャンク長などの設定値はCLIオプションではなく、`src/loopscribe/constants.py` で定義します。
 
 ## 開発
 
