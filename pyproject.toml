@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "loopscribe"
-version = "1.0.0"
+version = "1.1.0"
 description = "Windowsのシステム音声(WASAPIループバック)をローカルで日本語文字起こしするCLI"
 readme = "README.md"
 requires-python = ">=3.13"

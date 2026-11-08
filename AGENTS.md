@@ -14,16 +14,15 @@ faster-whisper(CPU / int8)+ Whisper `small`(`--model kotoba` で kotoba-whisper 
 
 1. **実行環境はWindowsのみ**。音声取得は WASAPIループバック(`pyaudiowpatch`)。開発はWSL2で行う。
 2. **Python 3.13以降**。
-3. **サブコマンドは3つだけ**: `start` / `download-model` / `devices`。
-4. **文字起こしの遅れは無制限に許容する。未処理の音声は破棄しない**(メモリに保持する)。
+3. **文字起こしの遅れは無制限に許容する。未処理の音声は破棄しない**(メモリに保持する)。
    バッファ上限による破棄や、欠落マーカーの出力は、初期版では実装しない。
-5. **警告のみの方針**: 実行中に続行可能な問題は警告を出して継続する。
+4. **警告のみの方針**: 実行中に続行可能な問題は警告を出して継続する。
    ただし起動時の致命的な状況(デバイス未検出、モデル取得不可)は、エラーメッセージを出して終了コード1で終了する。
    実行中にデバイスの切断などで取得ストリームが失敗した場合は、警告を出して録音を停止し、
    バックログを処理してから終了コード1で終了する(確定済み)。
-6. **進捗表示**: `処理済み時間 / 録音時間` をrichのプログレスバーでリアルタイム表示する。
-7. **完全ローカル処理**。ネットワーク通信はモデルのダウンロード時のみ。
-8. 初期版の対象は**システム音声のみ**(マイク入力は将来対応)。
+5. **進捗表示**: `処理済み時間 / 録音時間` をrichのプログレスバーでリアルタイム表示する。
+6. **完全ローカル処理**。ネットワーク通信はモデルのダウンロード時のみ。
+7. 音声の取得は**システム音声のみ**(マイク入力は将来対応)。ファイルの文字起こしは `transcribe` で、16bit PCM の wav だけを対象にする。
 
 ## コマンド
 
@@ -40,7 +39,7 @@ uv run scripts/bench_models.py scripts/data/sample.wav --reference scripts/data/
 
 ```
 src/loopscribe/
-├── cli.py            # Typerアプリ。start / download-model / devices
+├── cli.py            # Typerアプリ。start / record / transcribe / download-model / devices / config
 ├── constants.py      # モデルに依存しない設定値(CLIオプション化しない)
 ├── errors.py         # 起動時の致命的エラーなどの例外
 ├── model.py          # モデルの取得(download_model、未取得判定。repo id を受け取る汎用の処理)
@@ -58,11 +57,11 @@ src/loopscribe/
 ├── chunker.py        # チャンク区間と担当境界の計算
 ├── transcriber.py    # Transcriber プロトコル、Segment / Word、faster-whisperの結果の変換
 ├── pipeline.py       # スレッド構成、チャンク処理、セグメントの担当割当て
-├── output.py         # コンソール出力とtxt出力(Sink)
+├── output.py         # コンソール出力とtxt出力(Sink)、出力名の検査と連番付け
 └── progress.py       # プログレスバー(rich)
 scripts/bench_models.py          # モデル検証用(単体で動く。PEP 723)
 scripts/prepare_bench_audio.py   # 検証用wavの作成(ReazonSpeech。生成物は scripts/data/ で gitignore)
-scripts/run_wav.py               # 本番と同じパイプラインでwavを流す(WSLでの手動確認用)
+scripts/run_wav.py               # 本番と同じパイプラインでwavを流す(`transcribe` の実装時に削除する。#35)
 tests/
 ```
 
@@ -70,8 +69,12 @@ tests/
 
 - **音声取得とコアを分離する**。`AudioSource` の後ろにWindows固有の処理を閉じ込め、それ以外はOS非依存にする。
   `pyaudiowpatch` のimportは `wasapi.py` の中だけで行い、モジュールのimportも遅延させる(WSLで `uv sync` / テストが通るように)。
-- **CLIオプションは必要なものだけにする**: `start` の `--device` / `-o/--output-dir` / `--model` と、
-  `download-model` の `--model`。チャンク長などの設定値は `constants.py`(モデルに依存しない値)で定義する。
+- チャンク長などの設定値は `constants.py`(モデルに依存しない値)で定義する。
+  設定ファイル(TOML)の優先順位は CLIオプション > 設定ファイル > 組み込みの既定。
+- **`-n/--output-name`** は拡張子なしの名前として受け取り、拡張子はコマンドが付ける(末尾の `.txt` / `.wav` は取り除く)。
+  同名のファイルがあれば `_2`、`_3` … を付けて警告する。パスの区切り文字を含む名前はエラー(終了コード1)。
+  名前の検査と同名のファイルの確認(連番と警告)は、モデルの読み込みやデバイスを開く前に行う。
+  出力ファイルは上書きしない(新規作成のモードで開く)。
 - **推論パラメータはモデルごとに固定値で持つ**(`models/<モデル>.py`)。ユーザーが調整しきれないので、CLIオプションにしない。
   モデルを追加するときは `ModelSpec` を実装し、`models/__init__.py` の `MODELS` に登録する。
 - **設定値は引数で受け取り、既定値として定数を使う**。関数やクラスが `constants` をグローバルに直接参照すると、
@@ -83,7 +86,7 @@ tests/
 - **Ctrl+Cの扱い**: メインスレッドはイベント待ちのループ(`Event.wait(timeout)` を短い間隔で繰り返す)にし、
   文字起こしは別スレッドで実行する(ネイティブの推論呼び出し中はPythonのシグナル処理が遅れるため)。
   1回目: 録音を止めて、バックログを処理してから終了。2回目: sinkをflushして `os._exit(130)`。
-- wavを流す開発用の機能は `scripts/run_wav.py` に置き、**CLIオプションにはしない**。
+- wavの文字起こしは `transcribe` サブコマンドで行う(WSLでも動く)。`scripts/run_wav.py` は `transcribe` の実装時に削除する。
 - 型ヒントを付ける。`ruff` の指摘は残さない。コメントとdocstringは日本語でよい。
 
 ## テスト
@@ -104,6 +107,15 @@ tests/
 
 未確定事項・検証待ちの項目・既知の不具合は、GitHubのissueで管理します(`gh issue list`)。
 決まった内容は、設計資料の決定ログに追記してください。
+
+## プルリクエスト
+
+- Test plan にWindowsでの操作(実機での確認)が含まれる場合は、そのブランチを指定してインストールするコマンドをPRに載せる。
+ ブランチ名の `#` はURLのフラグメントと解釈されるので `%23` にエンコードする。
+
+ ```powershell
+ uv tool install --force "git+https://github.com/y-chiba1008/loopscribe.git@feature/%2334_add_output_name_option"
+ ```
 
 ## その他
 技術的な知見は /home/chiba/workspaces/knowledge-base を参照すること。

@@ -41,6 +41,7 @@ loopscribe devices                       # ループバック対象の出力デ�
 loopscribe start                         # 既定の出力デバイスの音声を文字起こし(Ctrl+Cで停止)
 loopscribe start --device "Speakers"     # デバイスを指定(番号または名前の一部)
 loopscribe start -o D:\notes             # txtの保存先(既定: カレントディレクトリ)
+loopscribe start -n meeting              # ファイル名を指定(meeting.txt。同名があれば meeting_2.txt …)
 loopscribe start --model kotoba          # kotoba-whisper で文字起こし(既定: small)
 ```
 
