@@ -9,7 +9,45 @@ from typing import Protocol, TextIO
 
 from rich.console import Console
 
-from loopscribe.constants import OUTPUT_ENCODING
+from loopscribe.constants import OUTPUT_ENCODING, OUTPUT_NAME_STRIP_SUFFIXES
+from loopscribe.errors import InvalidOutputNameError
+
+_PATH_SEPARATORS = ("/", "\\")
+
+
+def normalize_output_name(
+    name: str,
+    *,
+    strip_suffixes: tuple[str, ...] = OUTPUT_NAME_STRIP_SUFFIXES,
+) -> str:
+    """`-n/--output-name` の値を、拡張子なしの名前にする。
+
+    末尾の拡張子(`strip_suffixes`。大文字小文字は区別しない)は1つだけ取り除く。
+    パスの区切り文字を含む名前と、空の名前は `InvalidOutputNameError`。
+    """
+    if any(sep in name for sep in _PATH_SEPARATORS):
+        raise InvalidOutputNameError(
+            f"出力名にパスの区切り文字は使えません(保存先は -o で指定してください): {name}"
+        )
+    stem = name
+    lower = name.lower()
+    for suffix in strip_suffixes:
+        if lower.endswith(suffix.lower()):
+            stem = name[: -len(suffix)]
+            break
+    if not stem.strip():
+        raise InvalidOutputNameError(f"出力名が空です: {name!r}")
+    return stem
+
+
+def unique_output_path(output_dir: Path, stem: str, suffix: str) -> Path:
+    """`output_dir/stem+suffix` を返す。同名のファイルがあれば `_2`、`_3` … を付ける。"""
+    path = output_dir / f"{stem}{suffix}"
+    number = 2
+    while path.exists():
+        path = output_dir / f"{stem}_{number}{suffix}"
+        number += 1
+    return path
 
 
 @dataclass(frozen=True)

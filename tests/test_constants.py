@@ -48,5 +48,7 @@ def test_ui_and_output_constants() -> None:
     assert constants.BUFFER_WARN_MB == 2048.0
     assert constants.UI_REFRESH_SECONDS == 0.5
     assert constants.SIGNAL_POLL_SECONDS == 0.2
-    assert constants.OUTPUT_FILENAME_FORMAT == "loopscribe_%Y%m%d_%H%M%S.txt"
+    assert constants.OUTPUT_NAME_FORMAT == "loopscribe_%Y%m%d_%H%M%S"
+    assert constants.TRANSCRIPT_SUFFIX == ".txt"
+    assert constants.OUTPUT_NAME_STRIP_SUFFIXES == (".txt", ".wav")
     assert constants.OUTPUT_ENCODING == "utf-8"

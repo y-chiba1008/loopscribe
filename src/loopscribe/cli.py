@@ -17,10 +17,16 @@ import typer
 from rich.console import Console
 
 from loopscribe.audio.source import AudioSource
-from loopscribe.constants import OUTPUT_FILENAME_FORMAT
-from loopscribe.errors import FatalStartupError, ModelUnavailableError
+from loopscribe.constants import OUTPUT_NAME_FORMAT, TRANSCRIPT_SUFFIX
+from loopscribe.errors import FatalStartupError, InvalidOutputNameError, ModelUnavailableError
 from loopscribe.models import DEFAULT_MODEL, MODELS, get_model
-from loopscribe.output import ConsoleSink, MultiSink, TxtSink
+from loopscribe.output import (
+    ConsoleSink,
+    MultiSink,
+    TxtSink,
+    normalize_output_name,
+    unique_output_path,
+)
 from loopscribe.pipeline import PipelineProgress, TranscriptionPipeline
 from loopscribe.progress import ProgressReporter, model_loading_status
 
@@ -40,6 +46,18 @@ ModelOption = Annotated[
     typer.Option(
         "--model",
         help="文字起こしのモデル。kotoba は small より高精度だが、遅くRAMも多く使う",
+    ),
+]
+
+OutputNameOption = Annotated[
+    str | None,
+    typer.Option(
+        "-n",
+        "--output-name",
+        help=(
+            "出力ファイルの名前(拡張子なし。末尾の .txt / .wav は取り除く)。"
+            "同名のファイルがあれば _2, _3 … を付ける。既定: loopscribe_YYYYMMDD_HHMMSS"
+        ),
     ),
 ]
 
@@ -96,9 +114,14 @@ def run_transcription(
     console: Console,
     output_dir: Path,
     model_name: str = DEFAULT_MODEL,
+    output_name: str | None = None,
     stop_event: threading.Event | None = None,
 ) -> int:
-    """AudioSource から文字起こしを実行する(CLI と開発用スクリプトの共通経路)。"""
+    """AudioSource から文字起こしを実行する(CLI と開発用スクリプトの共通経路)。
+
+    `output_name` は `normalize_output_name` で検査済みの、拡張子なしの名前。
+    未指定なら、開始時刻から `OUTPUT_NAME_FORMAT` で作る。
+    """
     stop = stop_event if stop_event is not None else threading.Event()
 
     try:
@@ -113,7 +136,13 @@ def run_transcription(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     started_at = datetime.now()
-    txt_path = output_dir / started_at.strftime(OUTPUT_FILENAME_FORMAT)
+    stem = output_name if output_name is not None else started_at.strftime(OUTPUT_NAME_FORMAT)
+    txt_path = unique_output_path(output_dir, stem, TRANSCRIPT_SUFFIX)
+    if txt_path.name != f"{stem}{TRANSCRIPT_SUFFIX}":
+        console.print(
+            f"[yellow]警告:[/yellow] {stem}{TRANSCRIPT_SUFFIX} は既にあるため、"
+            f"{txt_path.name} に保存します。"
+        )
 
     sink_holder: dict[str, MultiSink | None] = {"sink": None}
     interrupt_count = 0
@@ -207,11 +236,17 @@ def start_cmd(
             resolve_path=False,
         ),
     ] = Path("."),
+    output_name: OutputNameOption = None,
     model: ModelOption = _DEFAULT_MODEL_NAME,
 ) -> None:
     """システム音声の取得と文字起こしを開始する。"""
     console = _make_console()
     _require_windows(console)
+    try:
+        stem = normalize_output_name(output_name) if output_name is not None else None
+    except InvalidOutputNameError as exc:
+        console.print(f"[red]エラー:[/red] {exc}")
+        raise typer.Exit(1) from exc
     try:
         wasapi = _load_wasapi()
         source = wasapi.open_loopback_source(device)
@@ -225,5 +260,11 @@ def start_cmd(
         console.print("`loopscribe devices` で一覧を確認してください。")
         raise typer.Exit(1) from exc
 
-    code = run_transcription(source, console=console, output_dir=output_dir, model_name=model.value)
+    code = run_transcription(
+        source,
+        console=console,
+        output_dir=output_dir,
+        model_name=model.value,
+        output_name=stem,
+    )
     raise typer.Exit(code)

@@ -15,3 +15,7 @@ class DeviceNotFoundError(FatalStartupError):
 
 class ModelUnavailableError(FatalStartupError):
     """モデルが未取得で、取得にも失敗した。"""
+
+
+class InvalidOutputNameError(FatalStartupError):
+    """`-n/--output-name` の値が、ファイル名として使えない。"""

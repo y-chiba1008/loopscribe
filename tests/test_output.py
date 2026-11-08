@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
+from loopscribe.errors import InvalidOutputNameError
 from loopscribe.output import (
     AbsoluteSegment,
     ConsoleSink,
@@ -17,7 +18,53 @@ from loopscribe.output import (
     format_header,
     format_line,
     format_timestamp,
+    normalize_output_name,
+    unique_output_path,
 )
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("meeting", "meeting"),
+        ("meeting.txt", "meeting"),
+        ("meeting.wav", "meeting"),
+        ("meeting.TXT", "meeting"),
+        ("meeting.wav.txt", "meeting.wav"),
+        ("meeting.mp3", "meeting.mp3"),
+        ("会議 11月", "会議 11月"),
+    ],
+)
+def test_normalize_output_name(name: str, expected: str) -> None:
+    assert normalize_output_name(name) == expected
+
+
+@pytest.mark.parametrize("name", ["notes/meeting", "notes\\meeting", "../meeting", "C:\\x"])
+def test_normalize_output_name_rejects_path_separators(name: str) -> None:
+    with pytest.raises(InvalidOutputNameError, match="-o"):
+        normalize_output_name(name)
+
+
+@pytest.mark.parametrize("name", ["", "  ", ".txt", ".wav"])
+def test_normalize_output_name_rejects_empty(name: str) -> None:
+    with pytest.raises(InvalidOutputNameError, match="空"):
+        normalize_output_name(name)
+
+
+def test_unique_output_path_without_conflict(tmp_path: Path) -> None:
+    assert unique_output_path(tmp_path, "meeting", ".txt") == tmp_path / "meeting.txt"
+
+
+def test_unique_output_path_adds_number(tmp_path: Path) -> None:
+    (tmp_path / "meeting.txt").write_text("")
+    assert unique_output_path(tmp_path, "meeting", ".txt") == tmp_path / "meeting_2.txt"
+    (tmp_path / "meeting_2.txt").write_text("")
+    assert unique_output_path(tmp_path, "meeting", ".txt") == tmp_path / "meeting_3.txt"
+
+
+def test_unique_output_path_ignores_other_suffix(tmp_path: Path) -> None:
+    (tmp_path / "meeting.wav").write_text("")
+    assert unique_output_path(tmp_path, "meeting", ".txt") == tmp_path / "meeting.txt"
 
 
 def test_format_timestamp() -> None:

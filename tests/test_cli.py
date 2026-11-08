@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import sys
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,10 +13,11 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from loopscribe.audio.wasapi import OutputDeviceInfo
-from loopscribe.cli import app
+from loopscribe.cli import app, run_transcription
 from loopscribe.errors import DeviceNotFoundError, ModelUnavailableError
 from loopscribe.models.kotoba import KotobaModel
 from loopscribe.models.small import SmallModel
+from loopscribe.transcriber import FakeTranscriber
 
 runner = CliRunner()
 
@@ -169,7 +172,7 @@ def test_start_opens_loopback_source(monkeypatch: pytest.MonkeyPatch) -> None:
     models: list[str] = []
     monkeypatch.setattr(
         "loopscribe.cli.run_transcription",
-        lambda source, console, output_dir, model_name: models.append(model_name) or 0,
+        lambda source, console, output_dir, model_name, output_name: models.append(model_name) or 0,
     )
 
     result = runner.invoke(app, ["start", "--device", "Speakers"])
@@ -186,3 +189,111 @@ def test_start_rejects_unknown_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     result = runner.invoke(app, ["start", "--model", "large"])
     assert result.exit_code == 2
+
+
+def test_start_help_shows_output_name() -> None:
+    result = runner.invoke(app, ["start", "--help"])
+    assert result.exit_code == 0
+    assert "--output-name" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ([], None),
+        (["-n", "meeting"], "meeting"),
+        (["--output-name", "meeting.txt"], "meeting"),
+    ],
+)
+def test_start_passes_output_name(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], expected: str | None
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    fake_wasapi = SimpleNamespace(open_loopback_source=lambda device: _EmptySource())
+    monkeypatch.setattr("loopscribe.cli._load_wasapi", lambda: fake_wasapi)
+    names: list[str | None] = []
+    monkeypatch.setattr(
+        "loopscribe.cli.run_transcription",
+        lambda source, console, output_dir, model_name, output_name: names.append(output_name) or 0,
+    )
+
+    result = runner.invoke(app, ["start", *args])
+    assert result.exit_code == 0
+    assert names == [expected]
+
+
+def test_start_rejects_path_in_output_name_before_opening_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    opened: list[str | None] = []
+    fake_wasapi = SimpleNamespace(
+        open_loopback_source=lambda device: opened.append(device) or _EmptySource(),
+    )
+    monkeypatch.setattr("loopscribe.cli._load_wasapi", lambda: fake_wasapi)
+
+    result = runner.invoke(app, ["start", "-n", "notes/meeting"])
+    assert result.exit_code == 1
+    assert "エラー" in result.stdout
+    assert opened == []
+
+
+class _EmptySource:
+    sample_rate = 16_000
+    channels = 1
+
+    def __iter__(self):
+        return iter(())
+
+    def close(self) -> None:
+        return None
+
+
+class _FakeSpec:
+    repo_id = "fake/model"
+
+    def ensure(self) -> Path:
+        return Path("/cache/fake")
+
+    def load(self, model_path: Path) -> FakeTranscriber:
+        return FakeTranscriber()
+
+
+def _run_empty(output_dir: Path, output_name: str | None) -> str:
+    stream = StringIO()
+    console = Console(file=stream, highlight=False, width=200)
+    code = run_transcription(
+        _EmptySource(), console=console, output_dir=output_dir, output_name=output_name
+    )
+    assert code == 0
+    return stream.getvalue()
+
+
+def test_run_transcription_uses_output_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("loopscribe.cli.get_model", lambda name: _FakeSpec())
+    out = _run_empty(tmp_path, "meeting")
+    assert (tmp_path / "meeting.txt").is_file()
+    assert "警告" not in out
+
+
+def test_run_transcription_numbers_existing_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("loopscribe.cli.get_model", lambda name: _FakeSpec())
+    (tmp_path / "meeting.txt").write_text("既存", encoding="utf-8")
+
+    out = _run_empty(tmp_path, "meeting")
+    assert (tmp_path / "meeting.txt").read_text(encoding="utf-8") == "既存"
+    assert (tmp_path / "meeting_2.txt").is_file()
+    assert "警告" in out
+    assert "meeting_2.txt" in out
+
+
+def test_run_transcription_default_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("loopscribe.cli.get_model", lambda name: _FakeSpec())
+    _run_empty(tmp_path, None)
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1
+    assert re.fullmatch(r"loopscribe_\d{8}_\d{6}\.txt", files[0].name)
