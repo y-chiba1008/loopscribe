@@ -16,7 +16,7 @@ PCで再生されている音声(システム音声)を、**ローカル(GPUな�
 
 | 項目 | 内容 |
 |---|---|
-| 実行OS | **Windowsのみ**(WASAPIループバック) |
+| 実行OS | **Windowsのみ**(WASAPIループバック)。これは音声の取得(`start` / `record` / `devices`)の話で、wavファイルを読む `transcribe` はOSに依存しない(WSLでも動く) |
 | 開発環境 | WSL2(コア部分の開発・テスト)+ Windows実機(音声取得の確認) |
 | Python | **3.13以降** |
 | 想定PC | Core i5-8350U(4コア8スレッド)、RAM 8GB、GPUなし(Intel UHD 620) |
@@ -96,7 +96,7 @@ loopscribe --version
 
 利用可能なモデルを一覧するサブコマンド(`models`)は作らない。`--model` のヘルプに選択肢が出る。
 
-**終了コード**: 0=正常終了、1=エラー(起動時の致命的な状況など)、130=2回目のCtrl+Cによる中断。
+**終了コード**: 0=正常終了、1=エラー(起動時の致命的な状況など)、130=2回目のCtrl+Cによる中断(`transcribe` では1回目のCtrl+Cでも130。§6.10)。
 
 ### 5.1 出力名(`-n/--output-name`)
 
@@ -281,6 +281,25 @@ AudioSource ──► AudioCapture(convert)──► WavWriter(16kHz・モノラ
 - Ctrl+C 1回目: 録音を止めてファイルを確定し、終了コード0。2回目: 即時終了(130。flush 済みの分までは読める)。
 - デバイスの切断などで取得が失敗した場合: 警告を出してファイルを確定し、終了コード1(§9)。
 
+### 6.10 wavファイルの文字起こし(`transcribe`。Issue #35)
+
+- 入力は 16bit PCM の wav(サンプルレート・チャンネル数は任意)。`WavFileSource` で読み、`start` と同じパイプライン
+  (`AudioCapture` → `AudioBuffer` → チャンク → 担当割当て → Sink)を通す。Windowsかどうかの確認はしない(WSLでも動く)。
+- 入力ファイルがない・wavとして読めない・16bit PCM でないときは、エラーを出して終了コード1。
+  確認は、出力名の確認(§5.1)とモデルの読み込みより前に行う。
+- 出力名の既定は入力ファイル名(`meeting.wav` → `meeting.txt`)。`-o` の既定はカレントディレクトリ。
+- txtのヘッダ: `# loopscribe 入力: meeting.wav / 処理開始: 2026-11-08 12:34:56 / モデル: ...`
+- **先読みの上限**: ファイルは推論より速く読めるので、上限がないとファイル全体がメモリに載る。
+  推論に渡していない音声が `FILE_READ_AHEAD_SECONDS`(2チャンク分 = 60秒)に達したら、captureスレッドを待たせる
+  (`TranscriptionPipeline` の `read_ahead_seconds`)。次のチャンクを読めないと止まるので、上限はチャンク長以上にする。
+  ライブ入力では使わない(決定事項「未処理の音声は破棄しない」は変えない)。
+- 遅れとバッファ超過の警告は出さない(ファイル入力では、遅れは異常ではないため)。
+- 進捗の合計は、wavのヘッダの長さで最初に決める。表示は `処理済み 00:01:00 / 音声 00:10:00 ━━━╸━━ 10%`(遅れは出さない)。
+  最後まで処理すると100%になる。
+- Ctrl+C 1回目: 処理中のチャンクを終え、そこまでを出力して(担当範囲の上限は外す)、終了コード130で終わる。
+  残りの音声は処理しない(`TranscriptionPipeline` の `process_backlog_on_stop=False`)。2回目: 即時終了(130)。
+- 読み込みの途中で失敗した場合は、`start` と同じく、読めた分を処理してから終了コード1(§9)。
+
 ## 7. 定数(`constants.py`)
 
 モデルに依存しない値だけを置く。推論パラメータは §6.8 のとおり、モデルごとのファイルに置く。
@@ -295,6 +314,7 @@ AudioSource ──► AudioCapture(convert)──► WavWriter(16kHz・モノラ
 | `LAG_WARN_SECONDS` | 600 | 遅れがこの値の倍数を超えるたびに、警告を1回出す |
 | `BUFFER_WARN_MB` | 2048 | バッファがこの量を超えたら警告(破棄はしない) |
 | `UI_REFRESH_SECONDS` / `SIGNAL_POLL_SECONDS` | 0.5 / 0.2 | |
+| `FILE_READ_AHEAD_SECONDS` | `2 * CHUNK_SECONDS`(60) | `transcribe` の先読みの上限(§6.10)。`CHUNK_SECONDS` 以上にする |
 | `RECORD_FLUSH_SECONDS` | 1.0 | `record` で、この秒数ぶん溜まるごとに wav へ書いて flush する(§6.9) |
 | `OUTPUT_NAME_FORMAT` | `loopscribe_%Y%m%d_%H%M%S` | `-n` 未指定時の出力名(拡張子なし) |
 | `TRANSCRIPT_SUFFIX` | `.txt` | 文字起こしの出力の拡張子 |
@@ -351,6 +371,7 @@ RTF>1のモデルを選ぶ場合は、想定する録音時間と、終了後に
 |---|---|
 | 起動時: 出力デバイスが見つからない | エラーメッセージ(`devices` で一覧を確認するよう案内)を出して終了(コード1) |
 | 起動時: モデルが未取得で、取得にも失敗した | エラーメッセージを出して終了(コード1) |
+| 起動時(`transcribe`): 入力ファイルがない・16bit PCM の wav として読めない | エラーメッセージを出して終了(コード1) |
 | 実行中: 処理が追いつかず、遅れが増える | 警告のみ。`LAG_WARN_SECONDS` の倍数を超えるたびに、1回だけ表示する。音声は破棄しない |
 | 実行中: バッファが `BUFFER_WARN_MB` を超えた | 警告のみ。破棄はしない |
 | 実行中: 1チャンクの推論で例外が出た | 警告(該当区間の時刻を含める)を出し、そのチャンクをスキップして継続する。txtには何も書かない |
@@ -373,7 +394,7 @@ RTF>1のモデルを選ぶ場合は、想定する録音時間と、終了後に
 1. WSL2(リポジトリは `~/` 配下)でコア部分を開発・テストする。`/mnt/c` 配下には置かない。
 2. GitHubにpushし、Windows側で `uv tool install --reinstall git+https://github.com/<account>/loopscribe` を実行して実機で確認する。
 3. モデルのキャッシュ(Hugging Face)はWSLとWindowsで別になる。ディスクの空きに注意する。
-4. 開発中にWSLでパイプライン全体を手動で試すには、wavを流す開発用スクリプト `scripts/run_wav.py` を作る(CLIオプションにはしない)。
+4. 開発中にWSLでパイプライン全体を手動で試すには、`loopscribe transcribe` でwavを流す(開発用スクリプト `scripts/run_wav.py` は、`transcribe` の実装で削除した。Issue #35)。
 
 ## 11. リスク・未確定事項
 

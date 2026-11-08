@@ -4,7 +4,8 @@
 scripts/data/jsut_ver1.1/ に展開済みの JSUT を読み、指定したサブセットから発話を選んで
 指定秒数に達するまでつなぐ。出力は prepare_bench_audio.py と同じ形式
 (16bit PCM・16kHz・モノラルの <name>.wav、1行1発話の <name>.txt、発話ごとの位置の <name>.json)。
-bench_models.py / eval_boundary.py / compare_boundary_rules.py / run_wav.py にそのまま渡せる。
+bench_models.py / eval_boundary.py / compare_boundary_rules.py / `loopscribe transcribe` に
+そのまま渡せる。
 
 発話の選び方は、サブセットの全発話を --seed で並べ替えて先頭から取る(同じ引数なら同じ組になる)。
 JSUT の各ファイルには、前後に合わせて0.2秒ほどの無音がある。--gap-seconds はその外側に足す無音。
