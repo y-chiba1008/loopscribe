@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+import wave
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,7 @@ def test_help_lists_subcommands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "start" in result.stdout
+    assert "record" in result.stdout
     assert "download-model" in result.stdout
     assert "devices" in result.stdout
 
@@ -299,3 +301,100 @@ def test_start_numbers_file_created_while_loading_model(
     assert (tmp_path / "meeting.txt").read_text(encoding="utf-8") == "読み込み中に作られた"
     assert (tmp_path / "meeting_2.txt").is_file()
     assert "meeting_2.txt に保存します" in result.stdout
+
+
+def _patch_record(monkeypatch: pytest.MonkeyPatch, source_factory=_EmptySource) -> list[str | None]:
+    monkeypatch.setattr(sys, "platform", "win32")
+    opened: list[str | None] = []
+    fake_wasapi = SimpleNamespace(
+        open_loopback_source=lambda device: opened.append(device) or source_factory(),
+    )
+    monkeypatch.setattr("loopscribe.cli._load_wasapi", lambda: fake_wasapi)
+    monkeypatch.setattr(
+        "loopscribe.cli.get_model",
+        lambda name: pytest.fail("record はモデルを読み込まない"),
+    )
+    return opened
+
+
+def test_record_rejects_non_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    result = runner.invoke(app, ["record"])
+    assert result.exit_code == 1
+    assert "Windows" in result.stdout
+
+
+def test_record_help_shows_options() -> None:
+    result = runner.invoke(app, ["record", "--help"])
+    assert result.exit_code == 0
+    assert "--device" in result.stdout
+    assert "--output-dir" in result.stdout
+    assert "--output-name" in result.stdout
+    assert "--model" not in result.stdout
+
+
+@pytest.mark.parametrize("name", ["meeting", "meeting.wav", "meeting.WAV"])
+def test_record_writes_output_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> None:
+    opened = _patch_record(monkeypatch)
+    result = runner.invoke(app, ["record", "--device", "2", "-o", str(tmp_path), "-n", name])
+    assert result.exit_code == 0
+    assert opened == ["2"]
+    assert [p.name for p in tmp_path.iterdir()] == ["meeting.wav"]
+    with wave.open(str(tmp_path / "meeting.wav"), "rb") as wf:
+        assert (wf.getnchannels(), wf.getsampwidth(), wf.getframerate()) == (1, 2, 16_000)
+    assert "警告" not in result.stdout
+
+
+def test_record_default_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _patch_record(monkeypatch)
+    result = runner.invoke(app, ["record", "-o", str(tmp_path)])
+    assert result.exit_code == 0
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1
+    assert re.fullmatch(r"loopscribe_\d{8}_\d{6}\.wav", files[0].name)
+
+
+def test_record_numbers_existing_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / "meeting.wav").write_bytes(b"existing")
+    _patch_record(monkeypatch)
+    result = runner.invoke(app, ["record", "-o", str(tmp_path), "-n", "meeting"])
+    assert result.exit_code == 0
+    assert (tmp_path / "meeting.wav").read_bytes() == b"existing"
+    assert (tmp_path / "meeting_2.wav").is_file()
+    assert result.stdout.count("警告") == 1
+
+
+def test_record_rejects_path_in_output_name_before_opening_device(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    opened = _patch_record(monkeypatch)
+    result = runner.invoke(app, ["record", "-o", str(tmp_path), "-n", "notes\\meeting"])
+    assert result.exit_code == 1
+    assert "エラー" in result.stdout
+    assert opened == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_record_device_not_found_exits_1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def _raise() -> _EmptySource:
+        raise DeviceNotFoundError("出力デバイスが見つかりません: X")
+
+    _patch_record(monkeypatch, source_factory=_raise)
+    result = runner.invoke(app, ["record", "-o", str(tmp_path), "--device", "X"])
+    assert result.exit_code == 1
+    assert "loopscribe devices" in result.stdout
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_record_capture_failure_exits_1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class FailingSource(_EmptySource):
+        def __iter__(self):
+            raise OSError("device lost")
+
+    _patch_record(monkeypatch, source_factory=FailingSource)
+    result = runner.invoke(app, ["record", "-o", str(tmp_path), "-n", "meeting"])
+    assert result.exit_code == 1
+    assert "device lost" in result.stdout
+    assert (tmp_path / "meeting.wav").is_file()
