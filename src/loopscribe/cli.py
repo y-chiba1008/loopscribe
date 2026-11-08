@@ -108,19 +108,29 @@ def _load_wasapi():
     return wasapi
 
 
+def resolve_output_path(console: Console, output_dir: Path, stem: str, suffix: str) -> Path:
+    """出力先のパスを決める。同名のファイルがあれば連番を付けて警告する。"""
+    path = unique_output_path(output_dir, stem, suffix)
+    if path.name != f"{stem}{suffix}":
+        console.print(
+            f"[yellow]警告:[/yellow] {stem}{suffix} は既にあるため、{path.name} に保存します。"
+        )
+    return path
+
+
 def run_transcription(
     source: AudioSource,
     *,
     console: Console,
     output_dir: Path,
     model_name: str = DEFAULT_MODEL,
-    output_name: str | None = None,
+    output_path: Path | None = None,
     stop_event: threading.Event | None = None,
 ) -> int:
     """AudioSource から文字起こしを実行する(CLI と開発用スクリプトの共通経路)。
 
-    `output_name` は `normalize_output_name` で検査済みの、拡張子なしの名前。
-    未指定なら、開始時刻から `OUTPUT_NAME_FORMAT` で作る。
+    `output_path` は `resolve_output_path` で決めた txt のパス。
+    未指定なら、開始時刻から `OUTPUT_NAME_FORMAT` で作り、`output_dir` に置く。
     """
     stop = stop_event if stop_event is not None else threading.Event()
 
@@ -134,15 +144,18 @@ def run_transcription(
     with model_loading_status(console, model_name=spec.repo_id):
         transcriber = spec.load(model_path)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     started_at = datetime.now()
-    stem = output_name if output_name is not None else started_at.strftime(OUTPUT_NAME_FORMAT)
-    txt_path = unique_output_path(output_dir, stem, TRANSCRIPT_SUFFIX)
-    if txt_path.name != f"{stem}{TRANSCRIPT_SUFFIX}":
-        console.print(
-            f"[yellow]警告:[/yellow] {stem}{TRANSCRIPT_SUFFIX} は既にあるため、"
-            f"{txt_path.name} に保存します。"
-        )
+    txt_path = output_path or resolve_output_path(
+        console, output_dir, started_at.strftime(OUTPUT_NAME_FORMAT), TRANSCRIPT_SUFFIX
+    )
+    txt_path.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            txt_sink = TxtSink(txt_path, started_at=started_at, model_name=spec.repo_id)
+            break
+        except FileExistsError:
+            # モデルの読み込み中に、同名のファイルが作られた場合
+            txt_path = resolve_output_path(console, txt_path.parent, txt_path.stem, txt_path.suffix)
 
     sink_holder: dict[str, MultiSink | None] = {"sink": None}
     interrupt_count = 0
@@ -164,7 +177,6 @@ def run_transcription(
     previous = signal.signal(signal.SIGINT, _on_sigint)
     try:
         console_sink = ConsoleSink(console)
-        txt_sink = TxtSink(txt_path, started_at=started_at, model_name=spec.repo_id)
         sink = MultiSink([console_sink, txt_sink])
         sink_holder["sink"] = sink
 
@@ -242,11 +254,14 @@ def start_cmd(
     """システム音声の取得と文字起こしを開始する。"""
     console = _make_console()
     _require_windows(console)
-    try:
-        stem = normalize_output_name(output_name) if output_name is not None else None
-    except InvalidOutputNameError as exc:
-        console.print(f"[red]エラー:[/red] {exc}")
-        raise typer.Exit(1) from exc
+    txt_path: Path | None = None
+    if output_name is not None:
+        try:
+            stem = normalize_output_name(output_name)
+        except InvalidOutputNameError as exc:
+            console.print(f"[red]エラー:[/red] {exc}")
+            raise typer.Exit(1) from exc
+        txt_path = resolve_output_path(console, output_dir, stem, TRANSCRIPT_SUFFIX)
     try:
         wasapi = _load_wasapi()
         source = wasapi.open_loopback_source(device)
@@ -265,6 +280,6 @@ def start_cmd(
         console=console,
         output_dir=output_dir,
         model_name=model.value,
-        output_name=stem,
+        output_path=txt_path,
     )
     raise typer.Exit(code)

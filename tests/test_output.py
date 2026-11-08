@@ -62,6 +62,14 @@ def test_unique_output_path_adds_number(tmp_path: Path) -> None:
     assert unique_output_path(tmp_path, "meeting", ".txt") == tmp_path / "meeting_3.txt"
 
 
+def test_txt_sink_does_not_overwrite(tmp_path: Path) -> None:
+    path = tmp_path / "meeting.txt"
+    path.write_text("既存", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        TxtSink(path, started_at=datetime(2026, 1, 1), model_name="small")
+    assert path.read_text(encoding="utf-8") == "既存"
+
+
 def test_unique_output_path_ignores_other_suffix(tmp_path: Path) -> None:
     (tmp_path / "meeting.wav").write_text("")
     assert unique_output_path(tmp_path, "meeting", ".txt") == tmp_path / "meeting.txt"

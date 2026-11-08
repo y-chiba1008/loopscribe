@@ -109,7 +109,10 @@ class ConsoleSink:
 
 
 class TxtSink:
-    """UTF-8 の txt へ1セグメントごとに flush する Sink。"""
+    """UTF-8 の txt へ1セグメントごとに flush する Sink。
+
+    既存のファイルは上書きしない(あれば `FileExistsError`)。
+    """
 
     def __init__(
         self,
@@ -120,7 +123,7 @@ class TxtSink:
         encoding: str = OUTPUT_ENCODING,
     ) -> None:
         self._path = Path(path)
-        self._file: TextIO = self._path.open("w", encoding=encoding, newline="\n")
+        self._file: TextIO = self._path.open("x", encoding=encoding, newline="\n")
         self._file.write(format_header(started_at, model_name=model_name) + "\n")
         self._file.flush()
 
