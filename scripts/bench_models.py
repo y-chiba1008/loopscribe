@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import itertools
 import json
 import os
 import platform
@@ -267,15 +268,35 @@ def transcribe_all(
     vad: bool,
     overlap_sec: float,
     whisper_chunk_length: int | None = None,
+    assign: str = "word",
+    batch_size: int | None = None,
+    batched_timestamps: bool = False,
 ) -> tuple[float, list[str]]:
     """全チャンクを順に文字起こしし、(推論にかかった合計秒, 重複除去後のセグメント本文) を返す。
 
     whisper_chunk_length は transcribe(chunk_length=...) に渡す。
+    batch_size を指定すると、BatchedInferencePipeline で推論する。チャンク内をVADで無音の位置で
+    区切り、whisper_chunk_length 秒以下のクリップごとに推論するので、固定長のウィンドウで
+    発話の途中を切らない(vad=True が必要)。BatchedInferencePipeline は既定で時刻トークンを
+    出さずにデコードする。batched_timestamps=True で時刻トークンありにする。
 
-    重複除去: 各セグメントを「開始時刻(録音開始からの絶対秒)が属する担当チャンク」だけが採用する。
-    チャンクkの担当範囲は [s_k + O/2, s_{k+1} + O/2)
+    重複除去: チャンクkの担当範囲は [s_k + O/2, s_{k+1} + O/2)
     (先頭チャンクの下限は0、最終チャンクの上限は無限大)。
+    - assign="word"(本番と同じ。設計資料§6.6): word_timestamps=True で推論し、
+      絶対開始時刻が担当範囲に入る語だけを採用する。語が無いセグメントは開始時刻で判定する。
+    - assign="start"(旧方式): セグメントの開始時刻が担当範囲に入るセグメントを採用する。
     """
+    word_timestamps = assign == "word"
+    if batch_size is None:
+        transcribe = model.transcribe
+        extra = {}
+    else:
+        if not vad:
+            raise ValueError("batch_size を指定するときは vad=True にすること")
+        from faster_whisper import BatchedInferencePipeline
+
+        transcribe = BatchedInferencePipeline(model).transcribe
+        extra = {"batch_size": batch_size, "without_timestamps": not batched_timestamps}
     elapsed = 0.0
     kept: list[str] = []
     last = len(spans) - 1
@@ -283,19 +304,25 @@ def transcribe_all(
         lo = 0.0 if k == 0 else spans[k][0] / SAMPLE_RATE + overlap_sec / 2
         hi = float("inf") if k == last else spans[k + 1][0] / SAMPLE_RATE + overlap_sec / 2
         t0 = time.perf_counter()
-        segments, _info = model.transcribe(
+        segments, _info = transcribe(
             audio[a:b],
             language=LANGUAGE,
             beam_size=beam_size,
             vad_filter=vad,
             condition_on_previous_text=False,
             chunk_length=whisper_chunk_length,
+            word_timestamps=word_timestamps,
+            **extra,
         )
         segs = list(segments)  # ジェネレータを消費するまでが推論時間
         elapsed += time.perf_counter() - t0
         offset = a / SAMPLE_RATE
         for seg in segs:
-            if lo <= offset + seg.start < hi:
+            if word_timestamps and seg.words:
+                text = "".join(w.word for w in seg.words if lo <= offset + w.start < hi).strip()
+                if text:
+                    kept.append(text)
+            elif lo <= offset + seg.start < hi:
                 kept.append(seg.text.strip())
     return elapsed, kept
 
@@ -317,6 +344,9 @@ class Result:
     verdict: str
     text_head: str
     whisper_chunk_length: int | None = None
+    assign: str = "word"
+    batch_size: int | None = None
+    batched_timestamps: bool = False
     ref_chars: int | None = None
     hyp_chars: int | None = None
     substitutions: int | None = None
@@ -330,18 +360,24 @@ class Result:
     @property
     def label(self) -> str:
         wcl = "none" if self.whisper_chunk_length is None else self.whisper_chunk_length
+        batch = "" if self.batch_size is None else f" batch={self.batch_size}"
+        if self.batched_timestamps:
+            batch += " ts"
         return (
             f"{self.model} thr={self.cpu_threads} beam={self.beam_size} "
-            f"vad={'on' if self.vad else 'off'} wcl={wcl}"
+            f"vad={'on' if self.vad else 'off'} wcl={wcl}{batch}"
         )
 
     @property
     def file_stem(self) -> str:
         wcl = "none" if self.whisper_chunk_length is None else self.whisper_chunk_length
         model = self.model.replace("/", "__")
+        batch = "" if self.batch_size is None else f"_batch{self.batch_size}"
+        if self.batched_timestamps:
+            batch += "_ts"
         return (
             f"{model}_thr{self.cpu_threads}_beam{self.beam_size}"
-            f"_vad{'on' if self.vad else 'off'}_wcl{wcl}"
+            f"_vad{'on' if self.vad else 'off'}_wcl{wcl}{batch}"
         )
 
 
@@ -374,16 +410,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--compute-type", default="int8", help="既定: int8")
     p.add_argument("--chunk-seconds", type=int, default=30)
     p.add_argument("--overlap-seconds", type=int, default=3)
+    p.add_argument(
+        "--assign",
+        choices=["word", "start"],
+        default="word",
+        help="重複除去で担当を決める基準。word は語ごとの開始時刻(本番と同じ、既定)、"
+        "start はセグメントの開始時刻(旧方式)",
+    )
     p.add_argument("--runs", type=int, default=3, help="条件ごとの計測回数(ウォームアップ除く)")
     p.add_argument("--seconds", type=float, help="音声の先頭N秒だけを使う")
     p.add_argument("--reference", help="正解テキスト(UTF-8)。指定するとCERを計算する")
     p.add_argument(
         "--whisper-chunk-length",
         nargs="+",
-        type=parse_whisper_chunk_length,
+        type=parse_optional_int,
         default=[None],
         metavar="N",
         help="transcribe(chunk_length=N) に渡す秒数。none は未指定(既定)。複数指定で比較する",
+    )
+    p.add_argument(
+        "--batch-sizes",
+        nargs="+",
+        type=parse_optional_int,
+        default=[None],
+        metavar="N",
+        help="BatchedInferencePipeline の batch_size。none は使わない(既定。WhisperModel で"
+        "固定長のウィンドウごとに推論する)。数値を指定すると、VADで区切ったクリップごとに推論する",
+    )
+    p.add_argument(
+        "--batched-timestamps",
+        action="store_true",
+        help="BatchedInferencePipeline で時刻トークンありにデコードする(既定は時刻トークンなし)",
     )
     p.add_argument("--json", help="結果をJSONで保存するパス")
     p.add_argument("--show-text", action="store_true", help="認識結果の先頭を表示する")
@@ -404,7 +461,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def parse_whisper_chunk_length(value: str) -> int | None:
+def parse_optional_int(value: str) -> int | None:
     if value.lower() == "none":
         return None
     n = int(value)
@@ -457,7 +514,7 @@ def main(argv: list[str] | None = None) -> int:
             )
     print(
         f"音声: {audio_sec:.1f}秒 / チャンク: {len(spans)}個"
-        f"({args.chunk_seconds}秒、重なり{args.overlap_seconds}秒)\n"
+        f"({args.chunk_seconds}秒、重なり{args.overlap_seconds}秒、担当の基準: {args.assign})\n"
     )
 
     results: list[Result] = []
@@ -478,95 +535,103 @@ def main(argv: list[str] | None = None) -> int:
             # 未指定の条件でもモデル既定の値を明示的に渡して元に戻す
             default_wcl = model.feature_extractor.chunk_length
             warmed = False
-            for beam in args.beam_sizes:
-                for vad_flag in args.vad:
-                    vad = vad_flag == "on"
-                    for wcl in args.whisper_chunk_length:
-                        effective_wcl = default_wcl if wcl is None else wcl
-                        if not warmed:
-                            print("[warmup] 先頭チャンクを1回処理(結果は捨てる)", flush=True)
-                            a, b = spans[0]
-                            list(
-                                model.transcribe(
-                                    audio[a:b],
-                                    language=LANGUAGE,
-                                    beam_size=beam,
-                                    vad_filter=vad,
-                                    condition_on_previous_text=False,
-                                    chunk_length=effective_wcl,
-                                )[0]
-                            )
-                            warmed = True
+            conditions = itertools.product(
+                args.beam_sizes, args.vad, args.whisper_chunk_length, args.batch_sizes
+            )
+            for beam, vad_flag, wcl, batch in conditions:
+                vad = vad_flag == "on"
+                effective_wcl = default_wcl if wcl is None else wcl
+                if not warmed:
+                    print("[warmup] 先頭チャンクを1回処理(結果は捨てる)", flush=True)
+                    a, b = spans[0]
+                    list(
+                        model.transcribe(
+                            audio[a:b],
+                            language=LANGUAGE,
+                            beam_size=beam,
+                            vad_filter=vad,
+                            condition_on_previous_text=False,
+                            chunk_length=effective_wcl,
+                        )[0]
+                    )
+                    warmed = True
 
-                        label = f"beam={beam} vad={vad_flag} wcl={'none' if wcl is None else wcl}"
-                        print(f"[run] {label} x{args.runs}", flush=True)
-                        run_secs: list[float] = []
-                        segments: list[str] = []
-                        with PeakMemory() as mem:
-                            for i in range(args.runs):
-                                elapsed, segments = transcribe_all(
-                                    model,
-                                    audio,
-                                    spans,
-                                    beam_size=beam,
-                                    vad=vad,
-                                    overlap_sec=args.overlap_seconds,
-                                    whisper_chunk_length=effective_wcl,
-                                )
-                                run_secs.append(elapsed)
-                                print(
-                                    f"       #{i + 1}: {elapsed:.1f}秒"
-                                    f" (RTF {elapsed / audio_sec:.2f})",
-                                    flush=True,
-                                )
-
-                        text = "".join(segments)
-                        hyp_norm = normalize_for_cer(text)
-                        rtfs = [s / audio_sec for s in run_secs]
-                        rtf_mean = sum(rtfs) / len(rtfs)
-                        result = Result(
-                            model=model_name,
-                            cpu_threads=threads,
+                label = f"beam={beam} vad={vad_flag} wcl={'none' if wcl is None else wcl}"
+                if batch is not None:
+                    label += f" batch={batch}"
+                print(f"[run] {label} x{args.runs}", flush=True)
+                run_secs: list[float] = []
+                segments: list[str] = []
+                with PeakMemory() as mem:
+                    for i in range(args.runs):
+                        elapsed, segments = transcribe_all(
+                            model,
+                            audio,
+                            spans,
                             beam_size=beam,
                             vad=vad,
-                            load_sec=load_sec,
-                            audio_sec=audio_sec,
-                            run_secs=run_secs,
-                            rtf_mean=rtf_mean,
-                            rtf_min=min(rtfs),
-                            rtf_max=max(rtfs),
-                            peak_rss_mb=mem.peak_mb,
-                            cer=None,
-                            verdict=verdict(rtf_mean),
-                            text_head=text[:120],
-                            whisper_chunk_length=wcl,
+                            overlap_sec=args.overlap_seconds,
+                            whisper_chunk_length=effective_wcl,
+                            assign=args.assign,
+                            batch_size=batch,
+                            batched_timestamps=args.batched_timestamps,
                         )
-                        diff_lines: list[str] | None = None
-                        if ref_lines is not None:
-                            ops = align("".join(ref_lines), hyp_norm)
-                            score = Score.from_ops(ops)
-                            result.cer = score.cer
-                            result.ref_chars = score.ref_chars
-                            result.hyp_chars = score.hyp_chars
-                            result.substitutions = score.substitutions
-                            result.deletions = score.deletions
-                            result.insertions = score.insertions
-                            result.substitution_rate = score.rate(score.substitutions)
-                            result.deletion_rate = score.rate(score.deletions)
-                            result.insertion_rate = score.rate(score.insertions)
-                            result.length_ratio = score.length_ratio
-                            diff_lines = render_diff(ops, ref_lines)
-                        if save_dir is not None:
-                            save_texts(save_dir, result, segments, hyp_norm, diff_lines)
-                        results.append(result)
-                        diffs.append(diff_lines)
+                        run_secs.append(elapsed)
+                        print(
+                            f"       #{i + 1}: {elapsed:.1f}秒 (RTF {elapsed / audio_sec:.2f})",
+                            flush=True,
+                        )
+
+                text = "".join(segments)
+                hyp_norm = normalize_for_cer(text)
+                rtfs = [s / audio_sec for s in run_secs]
+                rtf_mean = sum(rtfs) / len(rtfs)
+                result = Result(
+                    model=model_name,
+                    cpu_threads=threads,
+                    beam_size=beam,
+                    vad=vad,
+                    load_sec=load_sec,
+                    audio_sec=audio_sec,
+                    run_secs=run_secs,
+                    rtf_mean=rtf_mean,
+                    rtf_min=min(rtfs),
+                    rtf_max=max(rtfs),
+                    peak_rss_mb=mem.peak_mb,
+                    cer=None,
+                    verdict=verdict(rtf_mean),
+                    text_head=text[:120],
+                    whisper_chunk_length=wcl,
+                    assign=args.assign,
+                    batch_size=batch,
+                    batched_timestamps=args.batched_timestamps and batch is not None,
+                )
+                diff_lines: list[str] | None = None
+                if ref_lines is not None:
+                    ops = align("".join(ref_lines), hyp_norm)
+                    score = Score.from_ops(ops)
+                    result.cer = score.cer
+                    result.ref_chars = score.ref_chars
+                    result.hyp_chars = score.hyp_chars
+                    result.substitutions = score.substitutions
+                    result.deletions = score.deletions
+                    result.insertions = score.insertions
+                    result.substitution_rate = score.rate(score.substitutions)
+                    result.deletion_rate = score.rate(score.deletions)
+                    result.insertion_rate = score.rate(score.insertions)
+                    result.length_ratio = score.length_ratio
+                    diff_lines = render_diff(ops, ref_lines)
+                if save_dir is not None:
+                    save_texts(save_dir, result, segments, hyp_norm, diff_lines)
+                results.append(result)
+                diffs.append(diff_lines)
             del model
             gc.collect()
             print()
 
     print("== 結果 ==")
     header = (
-        f"{'model':<42} {'thr':>3} {'beam':>4} {'vad':>3} {'wcl':>4} {'load':>6} "
+        f"{'model':<42} {'thr':>3} {'beam':>4} {'vad':>3} {'wcl':>4} {'batch':>5} {'load':>6} "
         f"{'RTF(平均)':>9} {'min-max':>11} {'RSS(MB)':>8} {'CER':>6} {'長さ比':>5}  判定"
     )
     print(header)
@@ -574,9 +639,10 @@ def main(argv: list[str] | None = None) -> int:
         cer_s = f"{r.cer:.3f}" if r.cer is not None else "-"
         ratio_s = f"{r.length_ratio:.2f}" if r.length_ratio is not None else "-"
         wcl_s = "none" if r.whisper_chunk_length is None else str(r.whisper_chunk_length)
+        batch_s = "-" if r.batch_size is None else str(r.batch_size)
         print(
             f"{r.model:<42} {r.cpu_threads:>3} {r.beam_size:>4} {'on' if r.vad else 'off':>3} "
-            f"{wcl_s:>4} {r.load_sec:>5.1f}s {r.rtf_mean:>9.2f} "
+            f"{wcl_s:>4} {batch_s:>5} {r.load_sec:>5.1f}s {r.rtf_mean:>9.2f} "
             f"{r.rtf_min:>5.2f}-{r.rtf_max:<5.2f} {r.peak_rss_mb:>8.0f} {cer_s:>6} "
             f"{ratio_s:>8}  {r.verdict}"
         )
