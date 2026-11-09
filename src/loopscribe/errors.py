@@ -19,3 +19,10 @@ class ModelUnavailableError(FatalStartupError):
 
 class InvalidOutputNameError(FatalStartupError):
     """`-n/--output-name` の値が、ファイル名として使えない。"""
+
+
+class ConfigError(LoopscribeError):
+    """設定ファイルの読み書きに失敗した、または項目名・値が不正。
+
+    起動時は警告を出して無視する。`config` で更新するときは、エラーを出して終了コード 1 にする。
+    """
