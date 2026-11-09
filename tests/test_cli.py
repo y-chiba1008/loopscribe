@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 from loopscribe.audio.wasapi import OutputDeviceInfo
 from loopscribe.audio.wavfile import WavFileSource
 from loopscribe.cli import app, run_file_transcription
+from loopscribe.config import read_raw
 from loopscribe.errors import DeviceNotFoundError, ModelUnavailableError
 from loopscribe.models.kotoba import KotobaModel
 from loopscribe.models.small import SmallModel
@@ -566,3 +567,122 @@ def test_run_file_transcription_stopped_returns_130(
     assert code == 130
     assert "中断しました" in console.file.getvalue()
     assert (tmp_path / "meeting.txt").read_text(encoding="utf-8").startswith("# loopscribe 入力:")
+
+
+def test_config_shows_defaults_when_file_missing(config_file: Path) -> None:
+    result = runner.invoke(app, ["config"])
+    assert result.exit_code == 0
+    assert str(config_file) in result.stdout
+    assert "未作成" in result.stdout
+    assert "default-model = small" in result.stdout
+    assert "既定" in result.stdout
+    assert not config_file.exists()
+
+
+def test_config_sets_and_clears_default_model(config_file: Path) -> None:
+    result = runner.invoke(app, ["config", "default-model=kotoba"])
+    assert result.exit_code == 0
+    assert read_raw(config_file) == {"default-model": "kotoba"}
+    assert "更新しました" in result.stdout
+
+    result = runner.invoke(app, ["config"])
+    assert result.exit_code == 0
+    assert "default-model = kotoba" in result.stdout
+    assert "設定ファイル" in result.stdout
+
+    result = runner.invoke(app, ["config", "default-model="])
+    assert result.exit_code == 0
+    assert read_raw(config_file) == {}
+    assert "既定に戻しました" in result.stdout
+
+
+@pytest.mark.parametrize("argument", ["default-model=large", "nope=x", "default-model"])
+def test_config_rejects_invalid_arguments(config_file: Path, argument: str) -> None:
+    result = runner.invoke(app, ["config", argument])
+    assert result.exit_code == 1
+    assert "エラー" in result.stdout
+    assert not config_file.exists()
+
+
+def test_config_does_not_overwrite_broken_file(config_file: Path) -> None:
+    config_file.write_text("broken = [\n", encoding="utf-8")
+    result = runner.invoke(app, ["config", "default-model=kotoba"])
+    assert result.exit_code == 1
+    assert config_file.read_text(encoding="utf-8") == "broken = [\n"
+
+
+def test_config_warns_on_broken_file_and_shows_defaults(config_file: Path) -> None:
+    config_file.write_text('default-model = "kotoba\n', encoding="utf-8")
+    result = runner.invoke(app, ["config"])
+    assert result.exit_code == 0
+    assert "警告" in result.stdout
+    assert "default-model = small" in result.stdout
+
+
+def test_start_uses_config_default_model(
+    monkeypatch: pytest.MonkeyPatch, config_file: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    fake_wasapi = SimpleNamespace(open_loopback_source=lambda device: _EmptySource())
+    monkeypatch.setattr("loopscribe.cli._load_wasapi", lambda: fake_wasapi)
+    models: list[str] = []
+    monkeypatch.setattr(
+        "loopscribe.cli.run_transcription",
+        lambda source, console, output_dir, model_name, output_path: models.append(model_name) or 0,
+    )
+    runner.invoke(app, ["config", "default-model=kotoba"])
+
+    result = runner.invoke(app, ["start"])
+    assert result.exit_code == 0
+    assert models == ["kotoba"]
+
+    # CLI オプションは設定ファイルより優先する
+    result = runner.invoke(app, ["start", "--model", "small"])
+    assert result.exit_code == 0
+    assert models == ["kotoba", "small"]
+
+
+def test_start_warns_and_uses_small_when_config_is_invalid(
+    monkeypatch: pytest.MonkeyPatch, config_file: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    fake_wasapi = SimpleNamespace(open_loopback_source=lambda device: _EmptySource())
+    monkeypatch.setattr("loopscribe.cli._load_wasapi", lambda: fake_wasapi)
+    models: list[str] = []
+    monkeypatch.setattr(
+        "loopscribe.cli.run_transcription",
+        lambda source, console, output_dir, model_name, output_path: models.append(model_name) or 0,
+    )
+    config_file.write_text('default-model = "large"\n', encoding="utf-8")
+
+    result = runner.invoke(app, ["start"])
+    assert result.exit_code == 0
+    assert models == ["small"]
+    assert "警告" in result.stdout
+
+
+def test_transcribe_uses_config_default_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config_file: Path
+) -> None:
+    wav = tmp_path / "meeting.wav"
+    _write_wav(wav, seconds=1.0)
+    loaded = _patch_transcribe(monkeypatch)
+    config_file.write_text('default-model = "kotoba"\n', encoding="utf-8")
+
+    result = runner.invoke(app, ["transcribe", str(wav), "-o", str(tmp_path)])
+    assert result.exit_code == 0
+    assert loaded == ["kotoba"]
+
+
+def test_download_model_uses_config_default_model(
+    monkeypatch: pytest.MonkeyPatch, config_file: Path
+) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(
+        KotobaModel, "download", lambda self: called.append(self.name) or Path("/cache/kotoba")
+    )
+    config_file.write_text('default-model = "kotoba"\n', encoding="utf-8")
+
+    result = runner.invoke(app, ["download-model"])
+    assert result.exit_code == 0
+    assert called == ["kotoba"]

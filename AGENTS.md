@@ -40,6 +40,7 @@ uv run scripts/bench_models.py scripts/data/sample.wav --reference scripts/data/
 ```
 src/loopscribe/
 ├── cli.py            # Typerアプリ。start / record / transcribe / download-model / devices / config
+├── config.py         # 設定ファイル(TOML)の読み書き。項目は default-model だけ(設計資料 §5.2)
 ├── constants.py      # モデルに依存しない設定値(CLIオプション化しない)
 ├── errors.py         # 起動時の致命的エラーなどの例外
 ├── model.py          # モデルの取得(download_model、未取得判定。repo id を受け取る汎用の処理)

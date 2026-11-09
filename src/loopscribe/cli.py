@@ -1,4 +1,5 @@
-"""Typer による CLI。サブコマンド: start / record / transcribe / download-model / devices。"""
+"""Typer による CLI。サブコマンド: start / record / transcribe / download-model / devices /
+config。"""
 
 from __future__ import annotations
 
@@ -21,13 +22,26 @@ from rich.console import Console
 
 from loopscribe.audio.source import AudioSource
 from loopscribe.audio.wavfile import WavFileSource
+from loopscribe.config import (
+    DEFAULT_MODEL_KEY,
+    ITEMS,
+    Settings,
+    config_path,
+    load_settings,
+    write_item,
+)
 from loopscribe.constants import (
     FILE_READ_AHEAD_SECONDS,
     OUTPUT_NAME_FORMAT,
     RECORDING_SUFFIX,
     TRANSCRIPT_SUFFIX,
 )
-from loopscribe.errors import FatalStartupError, InvalidOutputNameError, ModelUnavailableError
+from loopscribe.errors import (
+    ConfigError,
+    FatalStartupError,
+    InvalidOutputNameError,
+    ModelUnavailableError,
+)
 from loopscribe.models import DEFAULT_MODEL, MODELS, get_model
 from loopscribe.models.base import ModelSpec
 from loopscribe.output import (
@@ -56,13 +70,15 @@ app = typer.Typer(
 
 # `--model` の選択肢。typer は Enum から選択肢とヘルプを作る
 ModelName = StrEnum("ModelName", {name: name for name in MODELS})
-_DEFAULT_MODEL_NAME = ModelName(DEFAULT_MODEL)
 
 ModelOption = Annotated[
-    ModelName,
+    ModelName | None,
     typer.Option(
         "--model",
-        help="文字起こしのモデル。kotoba は small より高精度だが、遅くRAMも多く使う",
+        help=(
+            "文字起こしのモデル。kotoba は small より高精度だが、遅くRAMも多く使う。"
+            f"省略時は設定ファイルの {DEFAULT_MODEL_KEY}(未設定なら {DEFAULT_MODEL})"
+        ),
     ),
 ]
 
@@ -123,6 +139,23 @@ def _root(
 
 def _make_console() -> Console:
     return Console(highlight=False)
+
+
+def _print_settings_warnings(console: Console, settings: Settings) -> None:
+    for message in settings.warnings:
+        console.print(f"[yellow]警告:[/yellow] {message}")
+
+
+def resolve_model(console: Console, model: ModelName | None) -> str:
+    """使うモデル名を決める。優先順位は CLIオプション > 設定ファイル > 組み込みの既定。
+
+    設定ファイルの問題は警告として出し、その項目は無視する。
+    """
+    settings = load_settings()
+    _print_settings_warnings(console, settings)
+    if model is not None:
+        return model.value
+    return settings.value_of(DEFAULT_MODEL_KEY)
 
 
 def _require_windows(console: Console) -> None:
@@ -418,10 +451,10 @@ def run_recording(
 
 
 @app.command("download-model")
-def download_model_cmd(model: ModelOption = _DEFAULT_MODEL_NAME) -> None:
+def download_model_cmd(model: ModelOption = None) -> None:
     """モデルを事前に取得する。"""
     console = _make_console()
-    spec = get_model(model.value)
+    spec = get_model(resolve_model(console, model))
     console.print(f"モデルを取得します: {spec.repo_id}")
     try:
         path = spec.download()
@@ -448,23 +481,74 @@ def devices_cmd() -> None:
         raise typer.Exit(1) from exc
 
 
+def _show_settings(console: Console, settings: Settings) -> None:
+    """設定ファイルの場所と、各項目の現在値・既定値を表示する。"""
+    missing = "" if settings.path.is_file() else "(未作成)"
+    console.print(f"設定ファイル: {settings.path}{missing}")
+    _print_settings_warnings(console, settings)
+    for item in ITEMS:
+        source = "設定ファイル" if item.key in settings.values else "既定"
+        value = settings.value_of(item.key)
+        console.print(f"{item.key} = {value}  (出所: {source} / 既定値: {item.default})")
+        console.print(f"    {item.description}")
+
+
+@app.command("config")
+def config_cmd(
+    assignment: Annotated[
+        str | None,
+        typer.Argument(
+            metavar="[項目名=値]",
+            help="項目を更新する。値を空にすると既定に戻す。省略時は設定を表示する",
+            show_default=False,
+        ),
+    ] = None,
+) -> None:
+    """設定ファイルの項目と値を表示する。`項目名=値` で更新する。
+
+    手で書いたコメントは、更新するとファイルから消える。
+    """
+    console = _make_console()
+    path = config_path()
+    if assignment is None:
+        _show_settings(console, load_settings(path))
+        return
+
+    key, sep, value = assignment.partition("=")
+    if not sep:
+        console.print("[red]エラー:[/red] `項目名=値` の形式で指定してください: " + assignment)
+        raise typer.Exit(1)
+    key = key.strip()
+    value = value.strip()
+    try:
+        write_item(path, key, value or None)
+    except ConfigError as exc:
+        console.print(f"[red]エラー:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    if value:
+        console.print(f"更新しました: {key} = {value}({path})")
+    else:
+        console.print(f"{key} を既定に戻しました({path})")
+
+
 @app.command("start")
 def start_cmd(
     device: DeviceOption = None,
     output_dir: OutputDirOption = Path("."),
     output_name: OutputNameOption = None,
-    model: ModelOption = _DEFAULT_MODEL_NAME,
+    model: ModelOption = None,
 ) -> None:
     """システム音声の取得と文字起こしを開始する。"""
     console = _make_console()
     _require_windows(console)
+    model_name = resolve_model(console, model)
     txt_path = _resolve_named_output(console, output_dir, output_name, TRANSCRIPT_SUFFIX)
     source = _open_loopback_source(console, device)
     code = run_transcription(
         source,
         console=console,
         output_dir=output_dir,
-        model_name=model.value,
+        model_name=model_name,
         output_path=txt_path,
     )
     raise typer.Exit(code)
@@ -490,10 +574,11 @@ def transcribe_cmd(
             ),
         ),
     ] = None,
-    model: ModelOption = _DEFAULT_MODEL_NAME,
+    model: ModelOption = None,
 ) -> None:
     """wav ファイル(16bit PCM)を文字起こしする。"""
     console = _make_console()
+    model_name = resolve_model(console, model)
     if not filename.is_file():
         console.print(f"[red]エラー:[/red] 入力ファイルがありません: {filename}")
         raise typer.Exit(1)
@@ -516,7 +601,7 @@ def transcribe_cmd(
         console=console,
         input_path=filename,
         output_path=txt_path,
-        model_name=model.value,
+        model_name=model_name,
     )
     raise typer.Exit(code)
 
