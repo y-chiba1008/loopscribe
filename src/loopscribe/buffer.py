@@ -45,7 +45,7 @@ class AudioBuffer:
             if samples.size == 0:
                 return
             self._data = np.concatenate((self._data, samples))
-            self._total += int(samples.size)
+            self._total += samples.size
             self._cond.notify_all()
 
     def read(self, start: int, end: int) -> NDArray[np.int16]:

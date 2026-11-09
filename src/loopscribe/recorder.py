@@ -48,7 +48,7 @@ class WavWriter:
         except Exception:
             self._file.close()
             raise
-        self._flush_frames = max(1, int(round(flush_seconds * sample_rate)))
+        self._flush_frames = max(1, round(flush_seconds * sample_rate))
         self._pending: list[NDArray[np.int16]] = []
         self._pending_frames = 0
         self._written_frames = 0

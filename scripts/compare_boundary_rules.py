@@ -135,8 +135,8 @@ def transcribe_chunks(
 ) -> list[ChunkResult]:
     results: list[ChunkResult] = []
     for span in spans:
-        a = int(round(span.start * SAMPLE_RATE))
-        b = min(int(round(span.end * SAMPLE_RATE)), audio.shape[0])
+        a = round(span.start * SAMPLE_RATE)
+        b = min(round(span.end * SAMPLE_RATE), audio.shape[0])
         t0 = time.perf_counter()
         segments = transcribe(audio[a:b])
         elapsed = time.perf_counter() - t0

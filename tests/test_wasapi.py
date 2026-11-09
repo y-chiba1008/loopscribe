@@ -169,7 +169,7 @@ def test_list_output_devices_builds_from_pyaudio(
         "maxInputChannels": 0,
         "isLoopbackDevice": False,
     }
-    loopback = {
+    loopback: dict[str, object] = {
         "index": 15,
         "name": "Speakers [Loopback]",
         "defaultSampleRate": 48000.0,

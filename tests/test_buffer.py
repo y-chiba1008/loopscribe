@@ -25,7 +25,7 @@ def test_append_and_read() -> None:
 def test_append_rejects_wrong_dtype_and_shape() -> None:
     buf = AudioBuffer()
     with pytest.raises(TypeError):
-        buf.append(np.array([1.0], dtype=np.float32))
+        buf.append(np.array([1.0], dtype=np.float32))  # pyrefly: ignore[bad-argument-type]
     with pytest.raises(ValueError):
         buf.append(np.array([[1, 2]], dtype=np.int16))
 

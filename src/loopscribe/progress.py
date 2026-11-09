@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 
 from rich.console import Console
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TaskProgressColumn,
+    TextColumn,
+)
 from rich.status import Status
 
 from loopscribe.constants import UI_REFRESH_SECONDS
@@ -47,7 +54,7 @@ class ProgressReporter:
         total_seconds: float | None = None,
     ) -> None:
         if enabled is None:
-            enabled = bool(console.is_terminal)
+            enabled = console.is_terminal
         self.console = console
         self.refresh_seconds = refresh_seconds
         self._enabled = enabled
@@ -73,7 +80,7 @@ class ProgressReporter:
             disable=not enabled,
             refresh_per_second=max(1.0, 1.0 / refresh_seconds) if refresh_seconds > 0 else 2.0,
         )
-        self._task_id: int | None = None
+        self._task_id: TaskID | None = None
 
     @property
     def enabled(self) -> bool:
@@ -84,7 +91,7 @@ class ProgressReporter:
         self._task_id = self._progress.add_task(
             "transcribe",
             total=1.0,
-            completed=0.0,
+            completed=0,
             processed=format_duration(0.0),
             recorded=format_duration(self._total_seconds or 0.0),
             lag=format_duration(0.0),
@@ -136,7 +143,7 @@ class RecordingReporter:
         refresh_seconds: float = UI_REFRESH_SECONDS,
     ) -> None:
         if enabled is None:
-            enabled = bool(console.is_terminal)
+            enabled = console.is_terminal
         self.console = console
         self._enabled = enabled
         self._progress = Progress(
@@ -147,7 +154,7 @@ class RecordingReporter:
             disable=not enabled,
             refresh_per_second=max(1.0, 1.0 / refresh_seconds) if refresh_seconds > 0 else 2.0,
         )
-        self._task_id: int | None = None
+        self._task_id: TaskID | None = None
 
     @property
     def enabled(self) -> bool:
@@ -182,7 +189,7 @@ def model_loading_status(
     console: Console,
     *,
     model_name: str,
-) -> Iterator[None]:
+) -> Generator[None]:
     """モデル読み込み中の表示。TTY ならスピナー、非TTY なら1行メッセージ。"""
     message = f"モデルを読み込み中: {model_name}"
     if console.is_terminal:

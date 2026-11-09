@@ -126,7 +126,7 @@ def test_download_model_rejects_unknown_model() -> None:
 def test_devices_lists_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     devices = [_fake_device()]
-    printed: list[object] = []
+    printed: list[tuple[object, object]] = []
 
     fake_wasapi = SimpleNamespace(
         list_output_devices=lambda: devices,
@@ -555,7 +555,8 @@ def test_run_file_transcription_stopped_returns_130(
     _patch_transcribe(monkeypatch)
     stop = threading.Event()
     stop.set()
-    console = Console(file=StringIO(), force_terminal=False, width=120, highlight=False)
+    stream = StringIO()
+    console = Console(file=stream, force_terminal=False, width=120, highlight=False)
 
     code = run_file_transcription(
         WavFileSource(wav),
@@ -565,7 +566,7 @@ def test_run_file_transcription_stopped_returns_130(
         stop_event=stop,
     )
     assert code == 130
-    assert "中断しました" in console.file.getvalue()
+    assert "中断しました" in stream.getvalue()
     assert (tmp_path / "meeting.txt").read_text(encoding="utf-8").startswith("# loopscribe 入力:")
 
 

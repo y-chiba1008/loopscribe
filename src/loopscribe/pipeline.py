@@ -125,7 +125,7 @@ class TranscriptionPipeline:
         self._wait_timeout = wait_timeout
         self._ui_refresh_seconds = ui_refresh_seconds
         self._read_ahead_samples = (
-            None if read_ahead_seconds is None else int(round(read_ahead_seconds * sample_rate))
+            None if read_ahead_seconds is None else round(read_ahead_seconds * sample_rate)
         )
         self._process_backlog_on_stop = process_backlog_on_stop
         self._progress = progress if progress is not None else PipelineProgress()
@@ -239,7 +239,7 @@ class TranscriptionPipeline:
                 self._progress.processed_seconds = recorded
 
     def _maybe_warn_buffer(self) -> None:
-        bytes_used = int(self._buffer.total_samples) * 2
+        bytes_used = self._buffer.total_samples * 2
         mb = bytes_used / (1024 * 1024)
         if mb > self._buffer_warn_mb and not self._buffer_warned:
             self._buffer_warned = True
@@ -255,15 +255,13 @@ class TranscriptionPipeline:
         while True:
             if self._interrupted():
                 break
-            need = int(
-                round(
-                    chunk_ready_at(
-                        index,
-                        chunk_seconds=self._chunk_seconds,
-                        overlap_seconds=self._overlap_seconds,
-                    )
-                    * self._sample_rate
+            need = round(
+                chunk_ready_at(
+                    index,
+                    chunk_seconds=self._chunk_seconds,
+                    overlap_seconds=self._overlap_seconds,
                 )
+                * self._sample_rate
             )
             while not self._buffer.wait_for(need, timeout=self._wait_timeout):
                 if self._buffer.closed or self._interrupted():
@@ -340,8 +338,8 @@ class TranscriptionPipeline:
                 self._progress.processed_seconds = recorded
 
     def _transcribe_span(self, span: ChunkSpan) -> list[Segment]:
-        start = int(round(span.start * self._sample_rate))
-        end = int(round(span.end * self._sample_rate))
+        start = round(span.start * self._sample_rate)
+        end = round(span.end * self._sample_rate)
         self._mark_consumed(end)
         end = min(end, self._buffer.total_samples)
         if end <= start:
@@ -384,7 +382,7 @@ class TranscriptionPipeline:
 
     def _trim_after_chunk(self, index: int) -> None:
         next_start = (index + 1) * step_seconds(self._chunk_seconds, self._overlap_seconds)
-        trim_at = int(round(next_start * self._sample_rate))
+        trim_at = round(next_start * self._sample_rate)
         total = self._buffer.total_samples
         if trim_at <= 0:
             return
