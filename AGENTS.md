@@ -31,6 +31,7 @@ uv sync                               # 依存を取得(WSLでも可)
 uv run pytest                         # 通常のテスト(slowを除く)
 uv run pytest -m slow                 # 実モデルを使うテスト
 uv run ruff check . && uv run ruff format .
+uv run pyrefly check                   # 型チェック(エラーも警告も0件を保つ)
 uv run scripts/prepare_bench_audio.py  # 検証用wavと正解テキストを scripts/data/ に作る
 uv run scripts/bench_models.py scripts/data/sample.wav --reference scripts/data/sample.txt
 ```

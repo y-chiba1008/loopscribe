@@ -38,9 +38,11 @@ dev = [
     # アプリ本体ではなく、エディタと `uv sync` の環境から import できるようにする。
     "datasets>=3.2,<4",
     "psutil>=6.0",
+    "pyrefly>=1.4",
     "pytest>=8.3",
     "ruff>=0.8",
     "soundfile>=0.12.1",
+    "types-psutil>=6.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -60,3 +62,12 @@ src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyrefly]
+project-includes = ["src", "tests", "scripts"]
+# scripts/ 同士の import と `tests.cer` を解決する(実行時は sys.path 操作や pytest が担う)
+search-path = [".", "scripts"]
+python-version = "3.13"
+# pyaudiowpatch は Windows 専用で、WSL では入らない。
+# wasapi.py 内でだけ遅延 import するので、解決できなくても警告にしない。
+replace-imports-with-any = ["pyaudiowpatch"]
