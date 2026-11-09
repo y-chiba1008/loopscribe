@@ -48,6 +48,7 @@ import time
 import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 import psutil
 
@@ -289,7 +290,7 @@ def transcribe_all(
     word_timestamps = assign == "word"
     if batch_size is None:
         transcribe = model.transcribe
-        extra = {}
+        extra: dict[str, Any] = {}
     else:
         if not vad:
             raise ValueError("batch_size を指定するときは vad=True にすること")
@@ -546,7 +547,7 @@ def main(argv: list[str] | None = None) -> int:
                     a, b = spans[0]
                     list(
                         model.transcribe(
-                            audio[a:b],
+                            audio[a:b],  # pyrefly: ignore[bad-argument-type]
                             language=LANGUAGE,
                             beam_size=beam,
                             vad_filter=vad,

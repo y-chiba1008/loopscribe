@@ -11,7 +11,7 @@ import signal
 import sys
 import threading
 import wave
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -69,7 +69,8 @@ app = typer.Typer(
 )
 
 # `--model` の選択肢。typer は Enum から選択肢とヘルプを作る
-ModelName = StrEnum("ModelName", {name: name for name in MODELS})
+# 選択肢は MODELS から動的に作るので、静的な型チェッカーは Enum と認識できない
+ModelName = StrEnum("ModelName", {name: name for name in MODELS})  # pyrefly: ignore[invalid-argument]
 
 ModelOption = Annotated[
     ModelName | None,
@@ -223,7 +224,7 @@ def _handle_sigint(
     *,
     first_message: str,
     on_force_exit: Callable[[], None] | None = None,
-) -> Iterator[None]:
+) -> Generator[None]:
     """Ctrl+C 1回目で `stop` をセットする。
 
     2回目は `on_force_exit` を呼んで、終了コード130で即時終了する。

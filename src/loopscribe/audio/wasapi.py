@@ -75,7 +75,7 @@ def _build_output_devices(pa: Any, pyaudio_mod: Any) -> list[OutputDeviceInfo]:
             continue
         try:
             loopback = pa.get_wasapi_loopback_analogue_by_dict(device)
-        except (LookupError, ValueError, KeyError):
+        except (LookupError, ValueError):
             continue
         index = int(device["index"])
         devices.append(

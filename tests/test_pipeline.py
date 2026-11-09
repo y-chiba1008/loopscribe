@@ -236,7 +236,7 @@ def test_pipeline_skips_chunk_on_transcriber_error(tmp_path: Path) -> None:
     )
     assert pipeline.run() == 0
     assert any("スキップ" in w for w in warnings)
-    assert console.file.getvalue() == "" or "[00:" not in stream.getvalue()
+    assert stream.getvalue() == "" or "[00:" not in stream.getvalue()
 
 
 def test_pipeline_stop_event_ends_capture_and_flushes(tmp_path: Path) -> None:

@@ -142,7 +142,7 @@ def join_with_gaps(
     pieces: list[np.ndarray], gap_seconds: float
 ) -> tuple[np.ndarray, list[tuple[int, int]]]:
     """発話の間に無音を入れてつなぐ。戻り値は (波形, 発話ごとの [開始, 終了) サンプル位置)。"""
-    gap = np.zeros(int(round(gap_seconds * SAMPLE_RATE)), dtype=np.float32)
+    gap = np.zeros(round(gap_seconds * SAMPLE_RATE), dtype=np.float32)
     parts: list[np.ndarray] = []
     spans: list[tuple[int, int]] = []
     position = 0

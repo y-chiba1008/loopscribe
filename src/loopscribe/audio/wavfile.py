@@ -34,9 +34,9 @@ class WavFileSource:
                 raise ValueError(f"16bit PCM WAV のみ対応(sampwidth={self._wf.getsampwidth()})")
             if self._wf.getcomptype() != "NONE":
                 raise ValueError(f"非圧縮 PCM のみ対応(comptype={self._wf.getcomptype()})")
-            self._sample_rate = int(self._wf.getframerate())
-            self._channels = int(self._wf.getnchannels())
-            self._nframes = int(self._wf.getnframes())
+            self._sample_rate = self._wf.getframerate()
+            self._channels = self._wf.getnchannels()
+            self._nframes = self._wf.getnframes()
             if self._sample_rate <= 0 or self._channels <= 0:
                 raise ValueError("不正な WAV ヘッダです")
         except Exception:
