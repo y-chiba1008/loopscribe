@@ -86,9 +86,12 @@ def format_header(
     started_at: datetime,
     *,
     model_name: str,
+    input_name: str | None = None,
 ) -> str:
-    """txt 先頭のヘッダ行。"""
+    """txt 先頭のヘッダ行。`input_name` はファイル入力(`transcribe`)のときの入力ファイル名。"""
     stamp = started_at.strftime("%Y-%m-%d %H:%M:%S")
+    if input_name is not None:
+        return f"# loopscribe 入力: {input_name} / 処理開始: {stamp} / モデル: {model_name}"
     return f"# loopscribe 開始: {stamp} / モデル: {model_name}"
 
 
@@ -120,12 +123,18 @@ class TxtSink:
         *,
         started_at: datetime,
         model_name: str,
+        input_name: str | None = None,
         encoding: str = OUTPUT_ENCODING,
     ) -> None:
         self._path = Path(path)
         self._file: TextIO = self._path.open("x", encoding=encoding, newline="\n")
-        self._file.write(format_header(started_at, model_name=model_name) + "\n")
+        header = format_header(started_at, model_name=model_name, input_name=input_name)
+        self._file.write(header + "\n")
         self._file.flush()
+
+    @property
+    def path(self) -> Path:
+        return self._path
 
     def write(self, segment: AbsoluteSegment) -> None:
         text = segment.text.strip()

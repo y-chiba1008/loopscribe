@@ -51,9 +51,9 @@ src/loopscribe/
 ├── audio/
 │   ├── source.py     # AudioSource プロトコル
 │   ├── wasapi.py     # WasapiLoopbackSource(Windows専用。importは遅延させる)
-│   ├── wavfile.py    # WavFileSource(開発・テスト用。WSLで動く)
+│   ├── wavfile.py    # WavFileSource(transcribe とテストで使う。WSLで動く)
 │   └── convert.py    # モノラル化 + 16kHzへのリサンプル(soxr.ResampleStream)
-├── capture.py        # AudioCapture(取得と変換のスレッド。start と record で共有)
+├── capture.py        # AudioCapture(取得と変換のスレッド。start / record / transcribe で共有)
 ├── buffer.py         # AudioBuffer(int16 / 16kHz / モノラル。スレッドセーフ)
 ├── chunker.py        # チャンク区間と担当境界の計算
 ├── transcriber.py    # Transcriber プロトコル、Segment / Word、faster-whisperの結果の変換
@@ -63,7 +63,6 @@ src/loopscribe/
 └── progress.py       # プログレスバー(rich)。record の録音時間・ファイルサイズの表示
 scripts/bench_models.py          # モデル検証用(単体で動く。PEP 723)
 scripts/prepare_bench_audio.py   # 検証用wavの作成(ReazonSpeech。生成物は scripts/data/ で gitignore)
-scripts/run_wav.py               # 本番と同じパイプラインでwavを流す(`transcribe` の実装時に削除する。#35)
 tests/
 ```
 
@@ -88,7 +87,8 @@ tests/
 - **Ctrl+Cの扱い**: メインスレッドはイベント待ちのループ(`Event.wait(timeout)` を短い間隔で繰り返す)にし、
   文字起こしは別スレッドで実行する(ネイティブの推論呼び出し中はPythonのシグナル処理が遅れるため)。
   1回目: 録音を止めて、バックログを処理してから終了。2回目: sinkをflushして `os._exit(130)`。
-- wavの文字起こしは `transcribe` サブコマンドで行う(WSLでも動く)。`scripts/run_wav.py` は `transcribe` の実装時に削除する。
+- wavの文字起こしは `transcribe` サブコマンドで行う(WSLでも動く)。WSLでパイプライン全体を手動で試すときも `transcribe` を使う。
+ ファイル入力だけ、先読みに上限を設ける(`read_ahead_seconds`)。ライブ入力では使わない。
 - 型ヒントを付ける。`ruff` の指摘は残さない。コメントとdocstringは日本語でよい。
 
 ## テスト

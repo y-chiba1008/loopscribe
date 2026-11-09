@@ -33,6 +33,8 @@ def progress_ratio(processed_seconds: float, recorded_seconds: float) -> float:
 class ProgressReporter:
     """処理済み時間 / 録音時間のプログレスバー。
 
+    `total_seconds` を渡すと(ファイル入力)、合計をその値に固定し、
+    「処理済み / 音声」を表示する(遅れは出さない)。
     標準出力が TTY でない場合は無効化し、本文出力だけを残す。
     """
 
@@ -42,17 +44,29 @@ class ProgressReporter:
         *,
         enabled: bool | None = None,
         refresh_seconds: float = UI_REFRESH_SECONDS,
+        total_seconds: float | None = None,
     ) -> None:
         if enabled is None:
             enabled = bool(console.is_terminal)
         self.console = console
         self.refresh_seconds = refresh_seconds
         self._enabled = enabled
+        self._total_seconds = total_seconds
+        if total_seconds is None:
+            columns = (
+                TextColumn("処理済み {task.fields[processed]} / 録音 {task.fields[recorded]}"),
+                BarColumn(bar_width=None),
+                TaskProgressColumn(),
+                TextColumn("遅れ {task.fields[lag]}"),
+            )
+        else:
+            columns = (
+                TextColumn("処理済み {task.fields[processed]} / 音声 {task.fields[recorded]}"),
+                BarColumn(bar_width=None),
+                TaskProgressColumn(),
+            )
         self._progress = Progress(
-            TextColumn("処理済み {task.fields[processed]} / 録音 {task.fields[recorded]}"),
-            BarColumn(bar_width=None),
-            TaskProgressColumn(),
-            TextColumn("遅れ {task.fields[lag]}"),
+            *columns,
             console=console,
             expand=True,
             transient=False,
@@ -72,7 +86,7 @@ class ProgressReporter:
             total=1.0,
             completed=0.0,
             processed=format_duration(0.0),
-            recorded=format_duration(0.0),
+            recorded=format_duration(self._total_seconds or 0.0),
             lag=format_duration(0.0),
         )
         return self
@@ -86,9 +100,13 @@ class ProgressReporter:
         if self._task_id is None:
             return
         processed = max(0.0, processed_seconds)
-        recorded = max(0.0, recorded_seconds)
-        # recorded が伸び続ける間は total も追従させる(録音中は 100% にならない)
-        total = max(recorded, processed, 1e-6)
+        if self._total_seconds is not None:
+            recorded = self._total_seconds
+            total = max(recorded, 1e-6)
+        else:
+            recorded = max(0.0, recorded_seconds)
+            # recorded が伸び続ける間は total も追従させる(録音中は 100% にならない)
+            total = max(recorded, processed, 1e-6)
         self._progress.update(
             self._task_id,
             completed=min(processed, total),

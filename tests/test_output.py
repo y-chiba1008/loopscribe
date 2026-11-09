@@ -99,6 +99,14 @@ def test_format_header() -> None:
     )
 
 
+def test_format_header_with_input() -> None:
+    started = datetime(2026, 11, 2, 12, 34, 56)
+    assert (
+        format_header(started, model_name="small", input_name="meeting.wav")
+        == "# loopscribe 入力: meeting.wav / 処理開始: 2026-11-02 12:34:56 / モデル: small"
+    )
+
+
 def test_console_sink_prints_line() -> None:
     stream = StringIO()
     console = Console(file=stream, force_terminal=False, width=120, highlight=False)

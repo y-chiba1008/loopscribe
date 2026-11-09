@@ -1,6 +1,6 @@
 """音声の取得スレッド(AudioSource から読み、モノラル int16 / 16kHz に変換して渡す)。
 
-`start` の文字起こしと `record` の録音で共有する。
+`start` / `transcribe` の文字起こしと `record` の録音で共有する。
 """
 
 from __future__ import annotations

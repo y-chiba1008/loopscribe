@@ -1,4 +1,4 @@
-"""開発・テスト用の WAV ファイル入力。"""
+"""WAV ファイル入力(`transcribe` とテストで使う)。"""
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ class WavFileSource:
                 raise ValueError(f"非圧縮 PCM のみ対応(comptype={self._wf.getcomptype()})")
             self._sample_rate = int(self._wf.getframerate())
             self._channels = int(self._wf.getnchannels())
+            self._nframes = int(self._wf.getnframes())
             if self._sample_rate <= 0 or self._channels <= 0:
                 raise ValueError("不正な WAV ヘッダです")
         except Exception:
@@ -51,6 +52,11 @@ class WavFileSource:
     @property
     def channels(self) -> int:
         return self._channels
+
+    @property
+    def duration_seconds(self) -> float:
+        """ヘッダから求めた音声長(秒)。"""
+        return self._nframes / self._sample_rate
 
     def __iter__(self) -> Iterator[NDArray[np.float32]]:
         if self._closed:

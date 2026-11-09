@@ -44,9 +44,16 @@ loopscribe start -o D:\notes             # txtの保存先(既定: カレント�
 loopscribe start -n meeting              # ファイル名を指定(meeting.txt。同名があれば meeting_2.txt …)
 loopscribe start --model kotoba          # kotoba-whisper で文字起こし(既定: small)
 loopscribe record -n meeting             # 文字起こしせずに録音だけする(meeting.wav。16kHz・モノラル、1時間で約115MB)
+loopscribe transcribe meeting.wav        # wav ファイルを文字起こし(meeting.txt に出力)
+loopscribe transcribe meeting.wav --model kotoba -o D:\notes -n meeting_kotoba
 ```
 
 `record` は `--device` / `-o` / `-n` を `start` と同じように指定できます。Ctrl+C を1回押すと、録音を止めてファイルを確定します。
+
+`transcribe` は 16bit PCM の wav を文字起こしします(サンプルレート・チャンネル数は問いません。`record` の wav はそのまま読めます)。
+低スペックPCで `kotoba` を使いたいときは、`record` で録音しておき、余裕があるときに `transcribe --model kotoba` で処理できます。
+`-n` の既定は入力ファイル名です。音声の取得をしないので、Windows以外(WSLなど)でも動きます。
+Ctrl+C を1回押すと、処理中のチャンクを終えてそこまでを出力し、終了します(終了コード130)。
 
 | `--model` | 特徴 |
 |---|---|
