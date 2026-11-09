@@ -46,6 +46,9 @@ loopscribe start --model kotoba          # kotoba-whisper で文字起こし(既
 loopscribe record -n meeting             # 文字起こしせずに録音だけする(meeting.wav。16kHz・モノラル、1時間で約115MB)
 loopscribe transcribe meeting.wav        # wav ファイルを文字起こし(meeting.txt に出力)
 loopscribe transcribe meeting.wav --model kotoba -o D:\notes -n meeting_kotoba
+loopscribe config                       # 設定ファイルの場所と、項目の現在値を表示
+loopscribe config default-model=kotoba  # 既定のモデルを kotoba にする(--model 省略時に使う)
+loopscribe config default-model=        # 既定に戻す(small)
 ```
 
 `record` は `--device` / `-o` / `-n` を `start` と同じように指定できます。Ctrl+C を1回押すと、録音を止めてファイルを確定します。
@@ -61,6 +64,9 @@ Ctrl+C を1回押すと、処理中のチャンクを終えてそこまでを出
 | `kotoba` | 精度が高い(文字誤り率が small より約15〜25%低い)が遅い。6コアのPCでも RTF 約0.8〜1.0、想定PCでは処理が遅れ続ける。RAMも多く使う |
 
 推論の細かいパラメータは、モデルごとに固定値を用意しています(オプションでは変えられません)。
+
+`--model` の既定は、設定ファイルの `default-model` で変えられます(優先順位は `--model` > 設定ファイル > `small`)。
+設定ファイルの場所は、Windows では `%APPDATA%\loopscribe\config.toml`、それ以外では `$XDG_CONFIG_HOME/loopscribe/config.toml` です(環境変数 `LOOPSCRIBE_CONFIG` で変えられます)。`loopscribe config` で更新すると、手で書いたコメントは消えます。
 
 - Ctrl+C を1回押すと録音を止め、未処理の音声を最後まで処理してから終了します。
   もう一度押すと、その場で中断します。
